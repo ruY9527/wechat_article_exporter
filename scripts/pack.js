@@ -36,7 +36,8 @@ function walk(dir, prefix) {
 }
 
 async function main() {
-  const JSZip = require('jszip');
+  // 复用扩展自带的 vendored JSZip，避免打一个 ZIP 还要额外的 npm 依赖
+  const JSZip = require(path.join(SRC, 'libs', 'jszip.min.js'));
   const manifest = JSON.parse(fs.readFileSync(path.join(SRC, 'manifest.json'), 'utf8'));
 
   const files = walk(SRC);

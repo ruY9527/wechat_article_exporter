@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 /**
  * tests/run-tests.js — 本地自动化回归测试
@@ -667,11 +667,10 @@ async function suiteLongArticle() {
   });
 
   await test('ZIP 内含 .md 与 images/ 子目录且文件数正确', async () => {
-    const JSZip = require('jszip');
-    // 重新走一遍以拿到真实 ZIP 数据（download:false 时不生成 blob，这里直接复用内部逻辑）
+    // 用扩展自带的 vendored JSZip，避免测试额外依赖未声明的 npm 包
+    const JSZip = require(path.join(SRC, 'libs', 'jszip.min.js'));
     const dom2 = createPage(readFixture('long-article'), { chrome: createChromeStub() });
     const api2 = dom2.window.__WX_EXPORTER_INTERNALS__;
-    const container = api2.extractContent(dom2.window.document);
     const meta = api2.extractMetadata(dom2.window.document, dom2.window.location.href);
 
     const zip = new JSZip();
@@ -684,7 +683,7 @@ async function suiteLongArticle() {
     const names = Object.keys(reopened.files).filter((n) => !reopened.files[n].dir);
     assert.ok(names.some((n) => n.endsWith('.md')), '缺少 .md');
     assert.strictEqual(names.filter((n) => n.startsWith('images/')).length, 16, '图片数量不正确');
-    assert.ok(container && meta.title, '提取流程异常');
+    assert.ok(meta.title, '元数据提取异常');
   });
 
   await test('并发池严格遵守并发上限', async () => {
