@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 /**
  * tests/convert.js — 离线转换自测（设计文档 6.3）

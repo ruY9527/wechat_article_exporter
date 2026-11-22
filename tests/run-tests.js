@@ -464,9 +464,9 @@ async function suitePrint() {
   const api = window.__WX_EXPORTER_INTERNALS__;
   const css = api.buildPrintStyleSheet();
 
-  await test('@page 设置为 A4 与 12mm/14mm 页边距', () => {
+  await test('@page 设置为 A4 与 A4 标准页边距', () => {
     assert.ok(/@page\s*\{\s*size:\s*A4;/.test(css), '缺少 A4');
-    assert.ok(/margin:\s*12mm 14mm;/.test(css), '页边距不正确');
+    assert.ok(/margin:\s*16mm 18mm;/.test(css), '页边距不正确');
   });
 
   await test('隐藏侧边二维码 / 底部点赞栏 / 评论区 / 标签', () => {
@@ -481,11 +481,32 @@ async function suitePrint() {
     assert.ok(/#js_content,[\s\S]*?max-width:\s*100%\s*!important/.test(css), '正文未自适应');
   });
 
-  await test('分页防截断规则存在', () => {
-    assert.ok(/img, pre, blockquote, table, figure, \.code-snippet__fix, tr, li\s*\{[\s\S]*?page-break-inside:\s*avoid/.test(css),
-      '缺少 break-inside: avoid');
-    assert.ok(/h1, h2, h3, h4, h5, h6\s*\{[\s\S]*?page-break-after:\s*avoid/.test(css),
+  await test('分页防截断分层控制（不再一刀切）', () => {
+    // 代码块（不可拆的大容器）仍保留 avoid
+    assert.ok(/#js_content \.code-snippet__fix\s*\{[\s\S]*?break-inside:\s*avoid/.test(css),
+      '代码块缺少 break-inside: avoid');
+    // 表格改为允许跨页，避免整张表被推到下一页
+    assert.ok(/#js_content table\s*\{[\s\S]*?break-inside:\s*auto/.test(css),
+      '表格应允许跨页');
+    // 表头跨页重复
+    assert.ok(/#js_content thead\s*\{[\s\S]*?display:\s*table-header-group/.test(css),
+      '缺少表头重复');
+    // 标题后不断页
+    assert.ok(/#js_content h1,[\s\S]*?page-break-after:\s*avoid/.test(css),
       '标题后未防分页');
+    // 引用允许跨页
+    assert.ok(/#js_content blockquote\s*\{[\s\S]*?break-inside:\s*auto/.test(css),
+      '引用应允许跨页');
+    // 禁止早期那种「所有元素都 avoid」的一刀切写法
+    assert.ok(!/img,\s*pre,\s*blockquote,\s*table,\s*figure,\s*\.code-snippet__fix,\s*tr,\s*li\s*\{/.test(css),
+      '仍存在一刀切 break-inside 规则');
+  });
+
+  await test('失败图片被压平（大空白根因的修复）', () => {
+    assert.ok(/img\[data-wx-img-broken\][\s\S]*?height:\s*0\s*!important/.test(css),
+      '缺少失败图压平规则');
+    assert.ok(/code-snippet__fix[\s\S]*?white-space:\s*normal/.test(css),
+      '代码块容器不应使用 pre-wrap（会把缩进文本渲染成空行）');
   });
 
   let imgsBeforePrint = [];
@@ -746,11 +767,17 @@ async function suiteStructure() {
   await test('打印样式在 content.js 与 print.css 中保持一致的关键声明', () => {
     const contentSrc = fs.readFileSync(path.join(SRC, 'content.js'), 'utf8');
     const printCss = fs.readFileSync(path.join(SRC, 'styles', 'print.css'), 'utf8');
-    ['@page { size: A4; margin: 12mm 14mm; }', 'break-inside: avoid', 'page-break-inside: avoid', '#js_pc_qr_code']
-      .forEach((token) => {
-        assert.ok(contentSrc.includes(token), 'content.js 缺少: ' + token);
-        assert.ok(printCss.includes(token), 'print.css 缺少: ' + token);
-      });
+    [
+      '@page { size: A4; margin: 16mm 18mm; }',
+      'break-inside: avoid',
+      'page-break-inside: avoid',
+      '#js_pc_qr_code',
+      'data-wx-img-broken',
+      'white-space: normal !important'
+    ].forEach((token) => {
+      assert.ok(contentSrc.includes(token), 'content.js 缺少: ' + token);
+      assert.ok(printCss.includes(token), 'print.css 缺少: ' + token);
+    });
   });
 
   await test('icons 为有效 PNG（魔数 + IHDR 尺寸）', () => {

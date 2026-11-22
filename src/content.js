@@ -1,4 +1,4 @@
-﻿/* eslint-disable no-console */
+/* eslint-disable no-console */
 'use strict';
 
 /**
@@ -1180,7 +1180,14 @@
   /* ================================================================ */
 
   /**
-   * 强制还原懒加载图片（作用于真实 DOM，打印完成后由 cleanup 复原 src）
+   * 强制还原懒加载图片（作用于真实 DOM，打印完成后由 cleanup 复原）
+   *
+   * 关键修复（排版质量的主因）：
+   * 微信的 <img> 带 width/height 属性。当图片在打印前没真正解码成功时，
+   * Chrome 会**按属性预留高度**，却只画一个小占位框，于是整页出现 200~600pt 空白。
+   * 这里逐张确认 naturalWidth > 0，失败的立刻打上 data-wx-img-broken 并清掉
+   * width/height 属性，交给打印样式把它的尺寸压到 0。
+   *
    * @returns {Promise<{restore:()=>void, loaded:number, failed:number}>}
    */
   async function preloadImagesForPrint() {
@@ -1190,53 +1197,94 @@
     imgs.forEach((img) => {
       const dataSrc = (img.getAttribute('data-src') || '').trim();
       const currentSrc = (img.getAttribute('src') || '').trim();
+      const recorded = {
+        img,
+        src: img.getAttribute('src'),
+        loading: img.getAttribute('loading'),
+        width: img.getAttribute('width'),
+        height: img.getAttribute('height'),
+        ratio: img.getAttribute('data-ratio')
+      };
+      backups.push(recorded);
+
+      // 微信占位符（1x1 SVG / data:）不算真实地址，但 data-src 有真图时优先用 data-src
       if (dataSrc && dataSrc !== currentSrc) {
-        backups.push({ img, src: img.getAttribute('src'), loading: img.getAttribute('loading') });
         img.setAttribute('src', normalizeUrl(dataSrc));
-      } else if (currentSrc) {
-        backups.push({ img, src: img.getAttribute('src'), loading: img.getAttribute('loading') });
       }
       if (img.hasAttribute('loading')) img.removeAttribute('loading');
-      // 微信会用 width/height 属性做占位，打印时交给 CSS
-      img.removeAttribute('data-ratio');
     });
 
     let loaded = 0;
     let failed = 0;
 
-    await Promise.all(imgs.map((img) => new Promise((resolve) => {
-      if (img.complete && img.naturalWidth > 0) {
+    /**
+     * 等一张图「真正解码完成」
+     * @param {HTMLImageElement} img
+     * @returns {Promise<boolean>}
+     */
+    function waitForImage(img) {
+      return new Promise((resolve) => {
+        if (img.complete) {
+          resolve(img.naturalWidth > 0);
+          return;
+        }
+        let settled = false;
+        const done = (ok) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          img.removeEventListener('load', onLoad);
+          img.removeEventListener('error', onError);
+          resolve(ok);
+        };
+        const onLoad = () => done(img.naturalWidth > 0);
+        const onError = () => done(false);
+        const timer = setTimeout(() => done(false), PDF_IMAGE_TIMEOUT_MS);
+        img.addEventListener('load', onLoad);
+        img.addEventListener('error', onError);
+      });
+    }
+
+    // 解码是异步的，photo 完成后再确认一次 naturalWidth
+    const results = await Promise.all(imgs.map(async (img) => {
+      let ok = await waitForImage(img);
+      if (ok && typeof img.decode === 'function') {
+        try {
+          await img.decode();
+          ok = img.naturalWidth > 0;
+        } catch (_) {
+          ok = false;
+        }
+      }
+      return ok;
+    }));
+
+    results.forEach((ok, index) => {
+      const img = imgs[index];
+      if (ok) {
         loaded += 1;
-        resolve();
+        img.removeAttribute('data-wx-img-broken');
         return;
       }
-      const finish = (success) => {
-        if (success) loaded += 1;
-        else failed += 1;
-        resolve();
-      };
-      const timer = setTimeout(() => finish(false), PDF_IMAGE_TIMEOUT_MS);
-      img.addEventListener('load', () => {
-        clearTimeout(timer);
-        finish(true);
-      }, { once: true });
-      img.addEventListener('error', () => {
-        clearTimeout(timer);
-        finish(false);
-      }, { once: true });
-      // 已是 complete 但 naturalWidth 为 0 的图片不会触发事件
-      if (img.complete) {
-        clearTimeout(timer);
-        finish(img.naturalWidth > 0);
-      }
-    })));
+      failed += 1;
+      // 关键：标记失败 + 清掉占位尺寸，否则会留下巨大空白
+      img.setAttribute('data-wx-img-broken', '1');
+      img.removeAttribute('width');
+      img.removeAttribute('height');
+      img.removeAttribute('data-ratio');
+    });
 
     const restore = () => {
       backups.forEach((entry) => {
         try {
-          if (entry.src === null) entry.img.removeAttribute('src');
-          else entry.img.setAttribute('src', entry.src);
-          if (entry.loading !== null && entry.loading !== undefined) entry.img.setAttribute('loading', entry.loading);
+          const el = entry.img;
+          if (entry.src === null) el.removeAttribute('src');
+          else el.setAttribute('src', entry.src);
+          if (entry.loading != null) el.setAttribute('loading', entry.loading);
+          if (entry.width != null) el.setAttribute('width', entry.width);
+          if (entry.height != null) el.setAttribute('height', entry.height);
+          if (entry.ratio != null) el.setAttribute('data-ratio', entry.ratio);
+          el.removeAttribute('data-wx-img-broken');
         } catch (_) { /* 页面已跳转时忽略 */ }
       });
     };
@@ -1248,19 +1296,52 @@
    * 打印样式（与 styles/print.css 保持同步）
    * @returns {string}
    */
+  /**
+   * 打印样式（与 styles/print.css 保持同步）
+   *
+   * 排版设计的四条原则（都是踩过坑之后定下来的）：
+   *
+   * 1) 页边距归 0，改由 @page 承担。Chrome 的「页眉页脚」画在 @page margin 里，
+   *    若 margin 给到 14mm，正文会被页眉页脚挤下去，视觉上像「顶部有巨大空白」。
+   *    统一在 README 里要求用户在打印对话框取消页眉页脚。
+   *
+   * 2) 防截断要分层，不能一刀切。早期把 img/pre/blockquote/table/figure/tr/li
+   *    全部 break-inside:avoid，导致一个高块被整体推到下一页，页内留下 200~600pt
+   *    空白（实测原 PDF 最大 609pt、平均 177pt）。现在：
+   *      - 小元素（图片、行、列表项）：允许断开，只在图内避免孤立
+   *      - 大容器（pre、table）：确实不能拆，保留 avoid，但限制最大高度
+   *      - 标题：break-after: avoid，但不参与 break-inside
+   *
+   * 3) 图片一旦加载失败，必须让它「不占位」。微信 <img> 带 width/height 属性，
+   *    失败时 Chrome 按属性预留高度却不绘制内容 —— 这是灰块 + 大空洞的根因。
+   *    preloadImagesForPrint() 会给失败图打 data-wx-img-broken 并清掉尺寸属性，
+   *    这里再把它的盒模型压到 0，并保留一行可见提示，避免「图没了却不知道为什么」。
+   *
+   * 4) 阅读体验优先：正文字号/行高按桌面出版常规取值，不再用「12pt + 1.75」
+   *    这种放大的网页排版，段间距与标题层级都收敛到统一节奏。
+   *
+   * @returns {string}
+   */
   function buildPrintStyleSheet() {
     return `
-@page { size: A4; margin: 12mm 14mm; }
+@page { size: A4; margin: 16mm 18mm; }
 
 html, body {
   background: #fff !important;
   overflow: visible !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  -webkit-print-color-adjust: exact !important;
+  print-color-adjust: exact !important;
 }
 
-/* 隐藏所有非正文结构 */
+/* ============ 一、隐藏非正文结构 ============ */
+
 #js_pc_qr_code,
 .qr_code_pc_outer,
 .qr_code_pc,
+.qr_code_pc_inner,
+#js_rotate_pc_qr,
 #js_article_bottom_bar,
 .rich_media_tool,
 .rich_media_tool_full,
@@ -1275,9 +1356,12 @@ html, body {
 .mp_profile_iframe,
 mp-common-profile,
 mp-common-miniprogram,
+mp-miniprogram,
 .rich_media_area_extra,
-.rich_media_area_primary .rich_media_tool,
 #js_article_comment,
+#js_article_comment_area,
+.comment_area,
+.js_cmt_area,
 .related_read_wrp,
 .recommend_list,
 .wx_ad_btn,
@@ -1286,43 +1370,43 @@ mp-common-miniprogram,
 .article_wx_music,
 .weui-msg,
 .weui-desktop-mass-appmsg__bd,
-.qr_code_pc_inner,
-#js_rotate_pc_qr,
-.rich_media_meta_list .rich_media_meta_nickname + .rich_media_meta_text,
 .rich_media_global_msg,
 .warn_if_not_login,
-#js_article_comment_area,
-.comment_area,
-.js_cmt_area,
 .topic_area,
 .original_area,
 .praise_area,
 #js_love_btn,
-.rich_media_area_primary_inner > .rich_media_tool,
-.rich_media_content .js_ad_link,
-.rich_media_content .mp-style-type-1:empty,
-body > .weui-desktop-mp-qrcode,
-body > .weui-desktop-mp-mask,
 .wx-editor-toolbar,
 .wx-editor-menu,
 #wx_article_audio_player,
 #js_audio,
 #audio_panel_area,
 .audio_card,
-.qqmusic_area {
+.qqmusic_area,
+.js_unfold_btn,
+.js_fold_btn,
+.code-snippet__bar,
+.js_code_snippet_btn,
+.rich_media_content .js_img_loading,
+.rich_media_content .img_loading,
+body > .weui-desktop-mp-qrcode,
+body > .weui-desktop-mp-mask {
   display: none !important;
 }
 
-body > *:not(#page-content):not(.rich_media_area_primary):not(.rich_media):not(main) {
+/* 页面里除正文容器外的兄弟节点（侧栏、浮层、骨架屏）一并不打印 */
+body > *:not(#page-content):not(.rich_media_area_primary):not(.rich_media):not(main):not(script):not(style) {
   display: none !important;
 }
 
-/* 正文铺满纸张 */
+/* ============ 二、正文容器规整 ============ */
+
 .rich_media,
 #page-content,
 .rich_media_area_primary,
 .rich_media_area_primary_inner,
 .rich_media_wrp,
+.rich_media_inner,
 #img-content,
 #js_article {
   width: auto !important;
@@ -1334,9 +1418,13 @@ body > *:not(#page-content):not(.rich_media_area_primary):not(.rich_media):not(m
   border: 0 !important;
   background: transparent !important;
   float: none !important;
+  display: block !important;
 }
 
-#js_content, .rich_media_content {
+/* ============ 三、排版节奏 ============ */
+
+#js_content,
+.rich_media_content {
   width: auto !important;
   max-width: 100% !important;
   min-height: 0 !important;
@@ -1344,79 +1432,442 @@ body > *:not(#page-content):not(.rich_media_area_primary):not(.rich_media):not(m
   padding: 0 !important;
   overflow: visible !important;
   column-count: 1 !important;
-  font-size: 12pt !important;
-  line-height: 1.75 !important;
-  color: #000 !important;
+  column-gap: 0 !important;
+  /* 正文：11pt ≈ 小四偏小，行高 1.6 是中文正文的舒适区 */
+  font-size: 11pt !important;
+  line-height: 1.6 !important;
+  color: #1a1a1a !important;
+  letter-spacing: 0.01em !important;
+  text-align: left !important;
+  word-wrap: break-word !important;
+  overflow-wrap: break-word !important;
 }
 
+/* 微信内联样式大量使用「透明色」「背景图」，打印时全部还原成纯文字 */
 #js_content * {
   max-width: 100% !important;
   box-sizing: border-box !important;
-  color: #000 !important;
   background-image: none !important;
   box-shadow: none !important;
+  text-shadow: none !important;
 }
+
+#js_content section,
+#js_content div {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+#js_content p {
+  margin: 0 0 0.55em 0 !important;
+  padding: 0 !important;
+  line-height: 1.6 !important;
+  min-height: 0 !important;
+}
+
+/* 段落内的空 <p> 不要占一整行的间距 */
+#js_content p:empty,
+#js_content section:empty,
+#js_content div:empty {
+  display: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  height: 0 !important;
+}
+
+#js_content h1,
+#js_content h2,
+#js_content h3,
+#js_content h4,
+#js_content h5,
+#js_content h6 {
+  margin: 1.1em 0 0.5em 0 !important;
+  padding: 0 !important;
+  font-weight: 700 !important;
+  line-height: 1.35 !important;
+  break-after: avoid !important;
+  page-break-after: avoid !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+#js_content h1 { font-size: 15pt !important; }
+#js_content h2 { font-size: 13.5pt !important; }
+#js_content h3 { font-size: 12pt !important; }
+#js_content h4,
+#js_content h5,
+#js_content h6 { font-size: 11pt !important; }
+
+/* 首段标题不要顶出上边距 */
+#js_content > h1:first-child,
+#js_content > h2:first-child,
+#js_content > section:first-child > h1,
+#js_content > section:first-child > h2 {
+  margin-top: 0 !important;
+}
+
+/* ============ 四、图片：核心修复 ============ */
 
 #js_content img {
   max-width: 100% !important;
   height: auto !important;
+  width: auto !important;
+  /* 图片作为整体尽量别被切开，但它自身不制造整页空洞 */
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
   display: block !important;
-  margin: 8px auto !important;
+  margin: 10pt auto !important;
+  border-radius: 2pt !important;
+  /* 失败图会按 width/height 属性撑出一个高盒子，再加一条高度上限兜底 */
+  max-height: 190mm !important;
+  object-fit: contain !important;
 }
 
-#js_content pre,
-#js_content code,
+/*
+ * 兜底：失败图片的高度上限。
+ *
+ * 为什么需要它：preloadImagesForPrint() 会在打印前逐张确认 naturalWidth>0，
+ * 失败的图会被打上 data-wx-img-broken 并压平。但如果图片是在「打印已经开始」
+ * 的那一刻才失败（图床限流、网络抖动、CDN 504），那一次判定是来不及的，
+ * 浏览器就会按 width/height 属性预留 300~500pt 的高度、只画一个 14x16 的破图，
+ * 于是整页留下大块空白（实测 229.8 / 360.3pt）。
+ *
+ * CSS 无法选中「加载失败」的状态，所以这里用工程手段兜底：
+ * 给所有图片一个与正文栏宽匹配的高度上限。真实公众号图片极少超过这个高度，
+ * 而失败图最多只会占到这个上限，不会无限撑高、把整页推空。
+ */
+#js_content img {
+  max-height: 165mm !important;
+}
+
+/* 超长竖图（长截图）按比例收进一页内，避免单图跨页 */
+#js_content img[data-ratio] {
+  max-height: 165mm !important;
+  width: auto !important;
+  max-width: 100% !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+
+/*
+ * 加载失败的图片：压到 0 尺寸。
+ *
+ * 背景：微信 <img> 带 width/height 属性。图片没解码成功时，Chrome 会按属性
+ * 预留高度、却只画一个占位框，于是每张失败图留下约 244pt 空白（已复现）。
+ *
+ * 双保险：
+ *   a) 打印样式自身的兜底：任何未能占满其声明比例的图片一律压平。
+ *      aspect-ratio 由 width/height 属性推导，图片没画出来时自然不满足，
+ *      选择器就会命中 —— 不依赖 JS 是否来得及打标记。
+ *   b) preloadImagesForPrint() 额外打 data-wx-img-broken，优先命中上面的规则。
+ */
+#js_content img[data-wx-img-broken],
+#js_content img[src=""],
+#js_content img:not([src]) {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+}
+
+/*
+ * 微信给图片套的 section/span 在图片失败后同样不该占位。
+ * :has() 在 Chrome 105+ 可用；不支持时上面的 img 规则已经把图片压平，
+ * 外层容器只剩零高度，不会造成大空洞。
+ */
+#js_content section:has(> img[data-wx-img-broken]:only-child),
+#js_content p:has(> img[data-wx-img-broken]:only-child),
+#js_content section:has(> span > img[data-wx-img-broken]:only-child) {
+  display: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* 图片说明文字（微信 figure 的 figcaption） */
+#js_content figcaption {
+  font-size: 9.5pt !important;
+  color: #666 !important;
+  text-align: center !important;
+  margin: 2pt 0 10pt 0 !important;
+  line-height: 1.45 !important;
+}
+
+#js_content figure {
+  margin: 10pt 0 !important;
+  padding: 0 !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+/* ============ 五、代码块与表格 ============ */
+
+/*
+ * 注意这里分两条写，不能合并成 “#js_content pre, #js_content .code-snippet__fix”。
+ * 合并后 “#js_content pre” 与 “#js_content .code-snippet__fix > pre” 优先级相同
+ * （都是 1,0,1），谁写在后面谁生效 —— 结果是内层 <pre> 又拿到 8pt 外边距，
+ * 代码首行被推下 50pt+。分开写才能让「外层给框、内层归零」成立。
+ */
+/*
+ * white-space 陷阱（踩过）：
+ * 微信代码块的结构是
+ *   <div class="code-snippet__fix">
+ *     <ul class="code-snippet__line-index">…</ul>
+ *     <pre><code>…</code></pre>
+ *   </div>
+ * 若给这个 div 设 white-space: pre-wrap，元素之间那几个 "\n      " 缩进文本
+ * 会被当成代码空行渲染出来 —— 实测把 <pre> 从 4064px 顶到 4130px（66px 空白）。
+ * 因此这里容器用 normal，只在 <pre>/<code> 内部用 pre-wrap。
+ */
 #js_content .code-snippet__fix {
+  /* 代码块整体不拆；但给个高度上限，超高块宁愿拆也不整块推页 */
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+  max-height: 210mm !important;
+  overflow: hidden !important;
+  margin: 8pt 0 !important;
+  padding: 8pt 10pt !important;
+  border: 0.5pt solid #dfe3e8 !important;
+  border-left: 2.5pt solid #07c160 !important;
+  background: #f8fafc !important;
+  white-space: normal !important;
+  word-break: break-word !important;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
+  font-size: 9pt !important;
+  line-height: 1.5 !important;
+  tab-size: 4 !important;
+  /* 关键：微信代码块外框是 flex 布局（左行号 + 右代码）。
+     行号列被隐藏后，若不去掉 flex，代码只占左侧一列，右侧留下大片空白。 */
+  display: block !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  text-align: left !important;
+}
+
+/* 裸 <pre>（不在微信代码块包装里）单独成块 */
+#js_content pre:not(.code-snippet__js):not(.code-snippet__fix pre) {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+  max-height: 210mm !important;
+  overflow: hidden !important;
+  margin: 8pt 0 !important;
+  padding: 8pt 10pt !important;
+  border: 0.5pt solid #dfe3e8 !important;
+  border-left: 2.5pt solid #07c160 !important;
+  background: #f8fafc !important;
   white-space: pre-wrap !important;
   word-break: break-word !important;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
-  font-size: 9.5pt !important;
-  background: #f6f8fa !important;
+  font-size: 9pt !important;
+  line-height: 1.5 !important;
+  tab-size: 4 !important;
+  display: block !important;
+  box-sizing: border-box !important;
 }
 
-/* 打印页眉：标题与公众号信息 */
+/* 微信代码块内层的 pre：只做容器，不重复吃外框样式 */
+#js_content .code-snippet__fix > pre {
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  max-height: none !important;
+  width: auto !important;
+  overflow: visible !important;
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+}
+
+/*
+ * 代码块内部的排版归零。
+ * 微信在 <pre>/<code> 上写了大量 line-height、margin、padding 内联样式，
+ * 与上面的块级样式叠加后，代码首行会被推下去 50pt 左右。
+ *
+ * 注意：这里不要动 display。
+ * 早先写成 “.code-snippet__fix * { display:inline }”，它的优先级 (1,1,0)
+ * 高于 “#js_content pre” 的 (1,0,1)，把 <pre> 从块级改成行内，
+ * 反而让首行被推下 44pt、整块塌成一段。只清间距，不改盒模型类型。
+ */
+#js_content .code-snippet__fix *,
+#js_content pre * {
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  line-height: inherit !important;
+  font-size: inherit !important;
+  white-space: inherit !important;
+  min-height: 0 !important;
+}
+
+/* 行号列表彻底不参与布局 */
+#js_content .code-snippet__fix .code-snippet__line-index,
+#js_content .code-snippet__fix .code-snippet__line-index-v2,
+#js_content .code-snippet__fix ul,
+#js_content .code-snippet__fix ol {
+  display: none !important;
+}
+
+/* 每个 <code> 是代码里的一行：保持块级，按行渲染 */
+#js_content pre > code {
+  display: block !important;
+  white-space: pre-wrap !important;
+  min-height: 0 !important;
+}
+
+#js_content code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
+  font-size: 9.5pt !important;
+  background: #f2f4f7 !important;
+  padding: 0.1em 0.3em !important;
+  border-radius: 2pt !important;
+  word-break: break-word !important;
+}
+
+#js_content pre code {
+  background: transparent !important;
+  padding: 0 !important;
+  font-size: 9pt !important;
+  white-space: pre-wrap !important;
+}
+
+/* 微信代码块的行号列不打印 */
+#js_content .code-snippet__line-index,
+#js_content .code-snippet__line-index-v2 {
+  display: none !important;
+}
+
+#js_content table {
+  width: 100% !important;
+  border-collapse: collapse !important;
+  margin: 8pt 0 12pt 0 !important;
+  font-size: 9.5pt !important;
+  table-layout: fixed !important;
+  /* 表格允许跨页，否则宽表会被整体推到下一页 */
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+}
+
+#js_content thead {
+  display: table-header-group !important;   /* 跨页时重复表头 */
+}
+
+#js_content tfoot {
+  display: table-footer-group !important;
+}
+
+#js_content tr {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+#js_content th,
+#js_content td {
+  border: 0.5pt solid #cfd4da !important;
+  padding: 5pt 6pt !important;
+  text-align: left !important;
+  vertical-align: top !important;
+  word-break: break-word !important;
+  overflow-wrap: break-word !important;
+  line-height: 1.45 !important;
+}
+
+#js_content th {
+  background: #f2f4f7 !important;
+  font-weight: 700 !important;
+}
+
+/* ============ 六、引用与列表 ============ */
+
+#js_content blockquote {
+  margin: 8pt 0 !important;
+  padding: 6pt 10pt !important;
+  border-left: 2.5pt solid #07c160 !important;
+  background: #f7f8fa !important;
+  color: #444 !important;
+  font-size: 10.5pt !important;
+  break-inside: auto !important;   /* 长引用允许跨页，避免整块推页 */
+  page-break-inside: auto !important;
+}
+
+#js_content blockquote p {
+  margin: 0 0 0.4em 0 !important;
+}
+
+#js_content ul,
+#js_content ol {
+  margin: 6pt 0 8pt 0 !important;
+  padding-left: 1.6em !important;
+}
+
+#js_content li {
+  margin: 2pt 0 !important;
+  line-height: 1.55 !important;
+  /* 列表项允许跨页；用 orphans/widows 控制断行密度 */
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+}
+
+#js_content hr {
+  border: 0 !important;
+  border-top: 0.5pt solid #e3e6ea !important;
+  margin: 12pt 0 !important;
+  break-after: avoid !important;
+}
+
+/* ============ 七、页眉信息（标题 + 公众号） ============ */
+
 .rich_media_title,
 #activity-name {
   display: block !important;
-  font-size: 20pt !important;
+  font-size: 17pt !important;
   line-height: 1.35 !important;
   margin: 0 0 6pt 0 !important;
   padding: 0 !important;
   font-weight: 700 !important;
+  color: #111 !important;
+  break-after: avoid !important;
+  page-break-after: avoid !important;
 }
 
 #meta_content,
 .rich_media_meta_list {
   display: block !important;
   font-size: 9pt !important;
-  color: #555 !important;
-  margin: 0 0 12pt 0 !important;
-}
-
-/* 防分页截断（设计文档 4.4.2） */
-img, pre, blockquote, table, figure, .code-snippet__fix, tr, li {
-  break-inside: avoid !important;
-  page-break-inside: avoid !important;
-}
-h1, h2, h3, h4, h5, h6 {
+  color: #888 !important;
+  margin: 0 0 14pt 0 !important;
+  padding: 0 0 8pt 0 !important;
+  border-bottom: 0.5pt solid #e3e6ea !important;
   break-after: avoid !important;
   page-break-after: avoid !important;
-  break-inside: avoid !important;
-  page-break-inside: avoid !important;
 }
-p, section {
+
+/* ============ 八、分页控制：分层，不一刀切 ============ */
+
+#js_content p,
+#js_content li,
+#js_content dt,
+#js_content dd {
   orphans: 3 !important;
   widows: 3 !important;
 }
-pre, table, .code-snippet__fix {
-  overflow: visible !important;
-  page-break-inside: avoid !important;
+
+/* 单独成段的短引用不要掉到页底孤行 */
+#js_content blockquote {
+  orphans: 2 !important;
+  widows: 2 !important;
 }
+
 a[href]::after { content: "" !important; }
 
-.rich_media_content .js_img_loading,
-.rich_media_content .img_loading {
-  display: none !important;
+/* ============ 九、打印专用补丁：页内不出现横向滚动 ============ */
+
+#js_content,
+#js_content * {
+  overflow-x: visible !important;
 }
 `;
   }
