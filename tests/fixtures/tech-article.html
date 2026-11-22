@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>用 Python 做数据清洗：从脏表到可用数据集 | 数据工程笔记</title>
+  <style>.hidden{display:none}</style>
+</head>
+<body>
+  <div id="page-content" class="rich_media">
+    <div class="rich_media_inner">
+      <div id="img-content" class="rich_media_area_primary">
+        <h1 class="rich_media_title" id="activity-name">
+          用 Python 做数据清洗：从脏表到可用数据集
+        </h1>
+        <div id="meta_content" class="rich_media_meta_list">
+          <span class="rich_media_meta rich_media_meta_text">张三</span>
+          <span class="rich_media_meta rich_media_meta_nickname" id="js_name">数据工程笔记</span>
+          <em id="publish_time" class="rich_media_meta rich_media_meta_text">2026-11-20 09:15</em>
+        </div>
+
+        <div class="rich_media_content" id="js_content" style="visibility: hidden;">
+          <section>
+            <p>数据清洗是数据工程里最不起眼、却最耗时间的一环。本文用一段真实案例，演示如何把一张脏表整理成可以直接分析的干净数据集。</p>
+          </section>
+
+          <section>
+            <h2>一、问题长什么样</h2>
+            <p>原始数据来自多个业务系统导出，存在重复行、缺失值、日期格式混乱、金额字段带单位等问题。</p>
+            <img
+              class="rich_pages wxw-img"
+              data-src="https://mmbiz.qpic.cn/mmbiz_png/abc123/640?wx_fmt=png&from=appmsg"
+              src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E"
+              data-ratio="0.5625"
+              data-w="1080"
+              alt="脏数据示例"
+            />
+          </section>
+
+          <section>
+            <h2>二、清洗代码</h2>
+            <div class="code-snippet__fix code-snippet__js">
+              <ul class="code-snippet__line-index code-snippet__js">
+                <li></li><li></li><li></li><li></li><li></li>
+              </ul>
+              <pre class="code-snippet__js" data-lang="python"><code>import pandas as pd
+</code><code>
+</code><code>def clean(df: pd.DataFrame) -&gt; pd.DataFrame:
+</code><code>    df = df.drop_duplicates()
+</code><code>    df["amount"] = df["amount"].str.replace("元", "").astype(float)
+</code><code>    return df
+</code><code>
+</code><code>print(clean(pd.read_csv("raw.csv")).head())
+</code></pre>
+            </div>
+
+            <p>注意 <code>drop_duplicates()</code> 要在类型转换之前执行，否则重复行判断会失准。</p>
+          </section>
+
+          <section>
+            <h2>三、效果对比</h2>
+            <table>
+              <thead>
+                <tr><th>字段</th><th>清洗前</th><th>清洗后</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>amount</td><td>1,234元</td><td>1234.0</td></tr>
+                <tr><td>date</td><td>2026/11/20</td><td>2026-11-20</td></tr>
+                <tr><td>city</td><td>北京 </td><td>北京</td></tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section>
+            <p>行内公式示例：均值为 <span data-formula="\bar{x}=\frac{1}{n}\sum_{i=1}^{n}x_i" data-formula-display="inline">x̄</span>，用于判断异常值。</p>
+            <p data-formula="\sigma = \sqrt{\frac{1}{n}\sum_{i=1}^{n}(x_i-\bar{x})^2}" data-formula-display="block" class="formula-block"></p>
+          </section>
+
+          <section>
+            <blockquote>提示：清洗规则最好写成可测试的纯函数，方便回归。</blockquote>
+            <ul>
+              <li>去重</li>
+              <li>类型转换</li>
+              <li>缺失值处理</li>
+            </ul>
+            <ol>
+              <li>先做结构清洗</li>
+              <li>再做业务校验</li>
+            </ol>
+            <p>参考链接：<a href="https://pandas.pydata.org/docs/">pandas 文档</a>，以及 <a>无 href 的锚点</a>。</p>
+          </section>
+
+          <section style="display: none;">
+            <p>这段是隐藏内容，不应该出现在导出的 Markdown 里。</p>
+          </section>
+
+          <section>
+            <div class="qr_code_pc"><p>扫码关注</p></div>
+            <div class="js_ad_link"><p>广告：买课立减</p></div>
+            <script>console.log('should be removed')</script>
+            <iframe src="https://example.com/embed"></iframe>
+            <mp-common-profile data-nickname="数据工程笔记"></mp-common-profile>
+          </section>
+
+          <section>
+            <p>结尾再放一张同样的图（应去重为同一张）：</p>
+            <img data-src="https://mmbiz.qpic.cn/mmbiz_png/abc123/640?wx_fmt=png&from=appmsg" src="" alt="重复图" />
+          </section>
+        </div>
+      </div>
+
+      <div id="js_article_bottom_bar">
+        <span class="like">点赞</span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

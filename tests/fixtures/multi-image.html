@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>多图排版测试：PNG?JPG/GIF|WebP 全格式 + 特殊字符标题 &quot;引号&quot; 与超长文本截断验证 - 视觉排版实验室</title>
+</head>
+<body>
+  <div id="page-content">
+    <div id="img-content">
+      <h1 class="rich_media_title" id="activity-name">
+        多图排版测试：PNG?JPG/GIF|WebP 全格式 + 特殊字符标题 "引号" 与超长文本截断验证 —— 这是一段刻意写得很长很长很长很长很长很长很长很长很长很长很长很长很长的副标题
+      </h1>
+      <div id="meta_content">
+        <span class="rich_media_meta rich_media_meta_text">李四</span>
+        <a class="rich_media_meta rich_media_meta_nickname" id="js_name">视觉排版实验室</a>
+        <em id="publish_time" class="rich_media_meta rich_media_meta_text">2026年11月18日 21:40</em>
+      </div>
+
+      <div class="rich_media_content" id="js_content">
+        <section>
+          <p>本文用于验证多格式图片的扩展名识别、懒加载还原与去重逻辑。</p>
+        </section>
+
+        <section>
+          <p>PNG 图（懒加载，src 为占位）：</p>
+          <img
+            data-src="https://mmbiz.qpic.cn/mmbiz_png/AAA111/0?wx_fmt=png"
+            src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+            alt="png 示例"
+          />
+        </section>
+
+        <section>
+          <p>JPG 图（wx_fmt=jpeg）：</p>
+          <img data-src="https://mmbiz.qpic.cn/mmbiz_jpg/BBB222/0?wx_fmt=jpeg&amp;tp=webp" src="" alt="jpg 示例" />
+        </section>
+
+        <section>
+          <p>GIF 动图（无 wx_fmt，路径带 .gif）：</p>
+          <img data-src="https://mmbiz.qpic.cn/mmbiz_gif/CCC333/0.gif" src="" alt="gif 示例" />
+        </section>
+
+        <section>
+          <p>WebP 图（wx_fmt=webp）：</p>
+          <img data-src="//mmbiz.qpic.cn/mmbiz_webp/DDD444/0?wx_fmt=webp" src="" alt="webp 示例" />
+        </section>
+
+        <section>
+          <p>同一张 GIF 再次出现（应去重）：</p>
+          <img data-src="https://mmbiz.qpic.cn/mmbiz_gif/CCC333/0.gif" src="" alt="gif 重复" />
+        </section>
+
+        <section>
+          <p>SVG 占位符（应被剔除）：</p>
+          <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E" alt="占位" />
+        </section>
+
+        <section>
+          <h2>排版与结构</h2>
+          <p><strong>加粗</strong>、<em>斜体</em>、<del>删除线</del>、<code>inline code</code> 混排。</p>
+          <blockquote>
+            <p>第一层引用</p>
+            <blockquote><p>第二层引用</p></blockquote>
+          </blockquote>
+          <hr />
+          <p>分隔线上方与下方都应保持空行。</p>
+        </section>
+
+        <section>
+          <figure>
+            <img data-src="https://mmbiz.qpic.cn/mmbiz_png/EEE555/0?wx_fmt=png" src="" alt="图注示意" />
+            <figcaption>图 1：带图注的图片</figcaption>
+          </figure>
+        </section>
+
+        <section>
+          <p>公式：<span data-latex="E=mc^2">E=mc²</span> 行内出现。</p>
+        </section>
+
+        <section>
+          <p>嵌入卡片（应移除）：</p>
+          <div class="appmsg_card_context"><p>推荐阅读</p></div>
+          <div class="mp_profile_iframe_wrp"><p>公众号名片</p></div>
+        </section>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

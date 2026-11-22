@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "微信公众号文章导出助手",
+  "version": "1.0.0",
+  "description": "一键把微信公众号文章导出为 Markdown（含本地图片 ZIP）或高保真、文字可选中的 PDF。",
+  "minimum_chrome_version": "102",
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://mp.weixin.qq.com/*",
+    "https://mmbiz.qpic.cn/*",
+    "https://mmbiz.qlogo.cn/*",
+    "https://res.wx.qq.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "导出公众号文章",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mp.weixin.qq.com/s*"
+      ],
+      "js": [
+        "libs/turndown.js",
+        "libs/turndown-plugin-gfm.js",
+        "libs/jszip.min.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

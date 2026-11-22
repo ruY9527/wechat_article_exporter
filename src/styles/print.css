@@ -1,0 +1,196 @@
+/* print.css — 打印样式参考副本
+ *
+ * 说明：扩展运行时由 content.js 的 buildPrintStyleSheet() 动态注入
+ * <style id="wx-exporter-print-style">，本文件仅供人工审阅 / 手工调试 /
+ * 浏览器开发者工具中粘贴使用，不参与打包逻辑。
+ *
+ * 修改样式时的正确做法：先改 content.js 的 buildPrintStyleSheet()，
+ * 再把同一份内容同步到本文件，避免两者漂移。
+ */
+
+@page { size: A4; margin: 12mm 14mm; }
+
+html,
+body {
+  background: #fff !important;
+  overflow: visible !important;
+}
+
+/* ---------- 隐藏非正文结构 ---------- */
+
+#js_pc_qr_code,
+.qr_code_pc_outer,
+.qr_code_pc,
+#js_article_bottom_bar,
+.rich_media_tool,
+.rich_media_tool_full,
+#js_tags,
+.js_tags_preview_toast,
+.reward_area,
+.reward_qrcode_area,
+#js_cmt_area,
+.discuss_container,
+.appmsg_card_context,
+.mp_profile_iframe_wrp,
+.mp_profile_iframe,
+mp-common-profile,
+mp-common-miniprogram,
+.rich_media_area_extra,
+#js_article_comment,
+#js_article_comment_area,
+.comment_area,
+.js_cmt_area,
+.related_read_wrp,
+.recommend_list,
+.wx_ad_btn,
+.js_ad_link,
+#js_sg_bar,
+.article_wx_music,
+.qr_code_pc_inner,
+#js_rotate_pc_qr,
+.rich_media_global_msg,
+.warn_if_not_login,
+.topic_area,
+.original_area,
+.praise_area,
+#js_love_btn,
+.wx-editor-toolbar,
+.wx-editor-menu,
+#wx_article_audio_player,
+#js_audio,
+#audio_panel_area,
+.audio_card,
+.qqmusic_area {
+  display: none !important;
+}
+
+body > *:not(#page-content):not(.rich_media_area_primary):not(.rich_media):not(main) {
+  display: none !important;
+}
+
+/* ---------- 正文铺满纸张 ---------- */
+
+.rich_media,
+#page-content,
+.rich_media_area_primary,
+.rich_media_area_primary_inner,
+.rich_media_wrp,
+#img-content,
+#js_article {
+  width: auto !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+  border: 0 !important;
+  background: transparent !important;
+  float: none !important;
+}
+
+#js_content,
+.rich_media_content {
+  width: auto !important;
+  max-width: 100% !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
+  column-count: 1 !important;
+  font-size: 12pt !important;
+  line-height: 1.75 !important;
+  color: #000 !important;
+}
+
+#js_content * {
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+  color: #000 !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+#js_content img {
+  max-width: 100% !important;
+  height: auto !important;
+  display: block !important;
+  margin: 8px auto !important;
+}
+
+#js_content pre,
+#js_content code,
+#js_content .code-snippet__fix {
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace !important;
+  font-size: 9.5pt !important;
+  background: #f6f8fa !important;
+}
+
+/* ---------- 打印页眉：标题与公众号信息 ---------- */
+
+.rich_media_title,
+#activity-name {
+  display: block !important;
+  font-size: 20pt !important;
+  line-height: 1.35 !important;
+  margin: 0 0 6pt 0 !important;
+  padding: 0 !important;
+  font-weight: 700 !important;
+}
+
+#meta_content,
+.rich_media_meta_list {
+  display: block !important;
+  font-size: 9pt !important;
+  color: #555 !important;
+  margin: 0 0 12pt 0 !important;
+}
+
+/* ---------- 防分页截断 ---------- */
+
+img,
+pre,
+blockquote,
+table,
+figure,
+.code-snippet__fix,
+tr,
+li {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  break-after: avoid !important;
+  page-break-after: avoid !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+p,
+section {
+  orphans: 3 !important;
+  widows: 3 !important;
+}
+
+pre,
+table,
+.code-snippet__fix {
+  overflow: visible !important;
+  page-break-inside: avoid !important;
+}
+
+a[href]::after {
+  content: "" !important;
+}
+
+.rich_media_content .js_img_loading,
+.rich_media_content .img_loading {
+  display: none !important;
+}

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>导出公众号文章</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app__header">
+        <div class="brand">
+          <img class="brand__icon" src="../icons/icon48.png" alt="" width="28" height="28" />
+          <div class="brand__text">
+            <h1 class="brand__title">公众号文章导出</h1>
+            <p class="brand__version">v1.0.0 · Markdown / PDF</p>
+          </div>
+        </div>
+      </header>
+
+      <!-- 页面状态提示栏 -->
+      <div id="page-status" class="status status--checking" role="status" aria-live="polite">
+        <span class="status__dot" aria-hidden="true"></span>
+        <span id="page-status-text" class="status__text">正在检测当前页面…</span>
+      </div>
+
+      <!-- 导出选项区 -->
+      <section class="options" aria-label="导出选项">
+        <label class="option" for="opt-bundle">
+          <input id="opt-bundle" type="checkbox" checked />
+          <span class="option__body">
+            <span class="option__label">导出 Markdown 时打包本地图片（ZIP）</span>
+            <span class="option__hint">关闭后仅保留原图链接，保存为纯 .md</span>
+          </span>
+        </label>
+        <label class="option" for="opt-frontmatter">
+          <input id="opt-frontmatter" type="checkbox" checked />
+          <span class="option__body">
+            <span class="option__label">添加 YAML Front Matter 元信息头</span>
+            <span class="option__hint">包含标题、作者、日期与原文链接</span>
+          </span>
+        </label>
+      </section>
+
+      <!-- 主操作按钮 -->
+      <section class="actions">
+        <button id="btn-markdown" class="btn btn--primary" type="button" disabled>
+          <span class="btn__icon" aria-hidden="true">MD</span>
+          <span class="btn__label">导出 Markdown</span>
+        </button>
+        <button id="btn-pdf" class="btn btn--secondary" type="button" disabled>
+          <span class="btn__icon" aria-hidden="true">PDF</span>
+          <span class="btn__label">导出 PDF</span>
+        </button>
+      </section>
+
+      <!-- 进度与状态反馈 -->
+      <section id="progress" class="progress" hidden aria-live="polite">
+        <div class="progress__bar">
+          <div id="progress-fill" class="progress__fill" style="width: 0%"></div>
+        </div>
+        <p id="progress-text" class="progress__text">准备中…</p>
+      </section>
+
+      <p id="hint" class="hint" hidden></p>
+
+      <footer class="app__footer">
+        <span>仅供个人归档使用 · 请遵守内容版权</span>
+      </footer>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
