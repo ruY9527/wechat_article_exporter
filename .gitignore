@@ -34,3 +34,14 @@ yarn-error.log*
 pnpm-debug.log*
 *.tmp
 *.temp
+
+# ---- 临时目录（浏览器调试配置等，不提交）----
+.tmp*/
+tmp/
+temp/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd

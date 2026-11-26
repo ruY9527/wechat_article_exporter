@@ -202,6 +202,43 @@ body {
   color: var(--text-soft);
 }
 
+.advanced-options {
+  margin: 3px -4px -4px;
+  border-top: 1px solid var(--border);
+}
+
+.advanced-options summary {
+  padding: 8px 11px 6px;
+  border-radius: 0 0 6px 6px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+
+.advanced-options summary:hover {
+  color: var(--text);
+  background: var(--bg-soft);
+}
+
+.advanced-options summary:focus-visible,
+.btn:focus-visible {
+  outline: 2px solid var(--wx-green-dark);
+  outline-offset: 2px;
+}
+
+.advanced-options__body {
+  padding: 0 4px 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 /* ---------- 按钮 ---------- */
 
 .actions {

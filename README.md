@@ -7,10 +7,18 @@
 | :--- | :--- |
 | **Markdown（`.zip`）** | `{标题}.md` + `images/img_001.png…`，图片本地化，断网也能正常渲染，彻底解决防盗链裂图 |
 | **Markdown（`.md`）** | 不下载图片，保留原图链接，适合快速摘录文字 |
+| **复制 Markdown** | 不下载文件，直接把清洗后的完整 Markdown 写入剪贴板 |
 | **高保真 PDF** | 懒加载图片全量预处理 + 分层分页控制 + 打印样式注入，文字可选可搜索 |
+| **单文件离线 HTML** | 正文图片 Base64 内联、CSS 内嵌，双击即可离线阅读 |
+| **EPUB 3 电子书** | 严格良构 XHTML、EPUB 3 导航与旧版 NCX，本地图片及封面元数据 |
+| **全页长图 PNG** | 按需申请临时 `debugger` 权限，通过 CDP 截取完整正文，超长文章自动降倍 |
 
 零构建：改完代码在 `chrome://extensions/` 刷新扩展即可，不需要 npm build。
 
+> **v1.2.0 新增**：内联粗体/斜体/删除线/高亮保留，封面与摘要提取，音视频/名片/引用卡片占位，
+> 图片消息（小绿书）适配，可选精选评论，以及 Copy MD、离线 HTML、EPUB 3、WebP 转 PNG、全页长图 PNG。
+> `debugger` 仅声明在 `optional_permissions`，只在用户点击长图导出并同意后使用，截图结束立即 detach。
+>
 > **v1.1.0 重点修复**：PDF 排版。原实现最大页内空白达 609pt（整页 72% 是空的）、
 > 11 张图变成灰块。现已降到 27.2pt、0 张灰块。修复依据与实测数据见 [§6 排版设计说明](#6-排版设计说明)。
 
@@ -21,11 +29,15 @@
 ```text
 wechat_article_exporter/
 ├── plan/
-│   └── design_and_test_plan.md      # 设计与测试方案（本项目的唯一规格来源）
+│   ├── design_and_test_plan.md      # v1.0/v1.1 设计与测试方案
+│   └── v1.2_extension_implementation_plan.md # v1.2 功能扩展实施规格
 ├── src/                             # ← 加载已解压扩展时选这个目录
 │   ├── manifest.json                # MV3 清单与权限
 │   ├── background.js                # Service Worker：跨域拉图 / 下载兜底 / 偏好读写
 │   ├── content.js                   # 内容脚本：DOM 提取、清洗、MD 转换、ZIP、PDF 打印
+│   ├── converters/
+│   │   ├── html.js                  # 单文件离线 HTML 转换器（零构建）
+│   │   └── epub.js                  # EPUB 3 打包与严格 XHTML 序列化
 │   ├── popup/
 │   │   ├── popup.html               # 弹窗 UI
 │   │   ├── popup.css                # 弹窗样式
@@ -114,6 +126,18 @@ wechat_article_exporter/
 - 「目标打印机」选 **另存为 PDF**
 - 展开「更多设置」→ 勾选 **背景图形**，取消 **页眉和页脚**
 
+### 3.3 v1.2 导出与高级选项
+
+- **复制 Markdown**：始终保留原图链接，不创建 ZIP 或 `.md` 文件；成功后显示复制字符数。`clipboardWrite` 用于异步生成完成后的可靠写入，保留用户点击路径与隐藏文本框兜底。
+- **离线 HTML / EPUB 电子书**：自动下载正文图片与封面；下载失败的图片保留原链接并显示警告。
+- **导出长图 PNG**：首次使用时 Chrome 会请求临时调试权限。授权后依次完成图片预热、页面准备、CDP 截图与现场恢复；拒绝授权不会改动页面。
+- **WebP 自动转 PNG**：在「更多解析与图片选项」中开启，Markdown ZIP、HTML 和 EPUB 共用本地转码；浏览器解码或 Canvas 失败时保留原 WebP。
+- **保留音视频/卡片占位**：默认开启；关闭后沿用 v1.1 的噪声剔除行为。
+- **附带导出精选评论**：默认关闭；开启后追加评论作者、点赞数和作者回复。
+- **图片消息 / 小绿书**：轮播图与短文进入统一导出管线；纯脚本渲染页面可回退解析 `picture_page_info_list`。
+
+长图超过 12,000 CSS 像素时缩放倍率从 2 降为 1，以降低 Chrome 的截图内存压力。截图期间可能出现 Chrome 调试提示，完成或失败后都会执行 detach；后台在 Popup 被关闭时仍发送页面清理，内容脚本另有超时恢复兜底，最终恢复页面样式、图片属性与滚动位置。
+
 ---
 
 ## 4. 三端调试
@@ -137,12 +161,12 @@ npm run test:layout  # 排版度量：真实 Chrome 打印 + PyMuPDF 量指标
 npm run test:all     # 两者都跑
 npm run test:convert # 离线转换，产物在 tests/output/*.md
 npm run icons        # 重新生成图标
-npm run pack         # 打包 dist/wechat-article-exporter-v1.1.0.zip
+npm run pack         # 打包 dist/wechat-article-exporter-v1.2.0.zip
 ```
 
 ### 5.1 自动化覆盖
 
-**`tests/run-tests.js`（53 项）**
+**`tests/run-tests.js`（79 项）**
 
 - **TC-04** 代码块（去行号列、保留语言标识、多段 `<code>` 逐行拼接、**代码块内空行与缩进不被后处理破坏**、
   4 反引号围栏不被误判）、表格（含 `<td>` 表头提升为 `<th>`）、
@@ -157,11 +181,13 @@ npm run pack         # 打包 dist/wechat-article-exporter-v1.1.0.zip
   **分页防截断分层控制**（代码块 avoid、表格 auto + 表头重复、引用 auto，且不得回到一刀切写法）、
   **失败图片压平规则**、代码块容器不得使用 `pre-wrap`
 - **TC-10** 打印样式注入后按 `PRINT_STYLE_ID` 完全移除
-- **TC-01 / TC-11** 非公众号页拦截并禁用按钮、文章页启用、内容脚本掉线提示、偏好读写
-- **结构一致性** manifest 字段、所有声明文件存在、`content_scripts` 匹配、`content.js` 与
+- **TC-01 / TC-11** 非公众号页拦截并禁用按钮、文章页启用、内容脚本掉线提示、五项偏好读写、六按钮顺序与折叠高级选项
+- **TC-12 ~ TC-16** 内联语义样式及标题/代码保护、封面摘要与 ZIP 封面、媒体占位开关、图片消息 DOM/纯脚本解析、精选评论开关
+- **TC-17 ~ TC-20** Copy MD 不触发下载、单文件 HTML 图片/CSS 内联、EPUB ZIP 反解与 `mimetype` STORE/XML 良构、WebP 转码及异常回退
+- **结构一致性** manifest 字段、`debugger` 仅可选权限、转换器加载顺序、所有声明文件存在、`content_scripts` 匹配、`content.js` 与
   `print.css` 关键声明同步、PNG 魔数与 IHDR 尺寸、`background.js` 顶层注册 listener
 
-**`tests/background-tests.js`（15 项）**
+**`tests/background-tests.js`（19 项）**
 
 `FETCH_IMAGE` 成功/403 不重试/500 重试一次/重试成功/空响应体/非法协议拒绝、
 `referrerPolicy: 'no-referrer'` 与 `credentials: 'omit'`、`//` 协议补全、
@@ -208,6 +234,10 @@ npm run pack         # 打包 dist/wechat-article-exporter-v1.1.0.zip
 | **TC-03** | 解压产物拖进 Typora / Obsidian，**断网**打开 | 图片全部正常渲染 |
 | **TC-08** | 长图文，**不滚动**直接导出 PDF | 预览里图片已加载、无侧边二维码与底部推荐栏 |
 | **TC-09（人工部分）** | 另存 PDF 后打开 | 图/代码块不被拦腰截断；文字可选中复制 |
+| **TC-17（人工部分）** | 点击「复制 Markdown」后粘贴到编辑器 | 内容完整，字符数提示正确，不产生下载 |
+| **TC-18（人工部分）** | 断网双击导出的单文件 HTML | 排版与全部成功下载的图片可离线显示 |
+| **TC-19（人工部分）** | EPUB 导入 Calibre / 微信读书 | 封面、目录锚点、正文图片与 XHTML 可正常读取 |
+| **TC-21（人工部分）** | 首次长图授权、拒绝授权、成功与中途失败 | 权限提示符合预期；结束后无调试横幅，页面位置与图片状态恢复 |
 
 ### 5.4 离线转换自测（改规则时用）
 

@@ -92,6 +92,10 @@ async function buildPrintHtml(fixtureName, opts) {
   const api = window.__WX_EXPORTER_INTERNALS__;
   const printCss = api.buildPrintStyleSheet();
   const doc = window.document;
+  if (api.isPictureMessagePage(doc)) {
+    api.materializePictureExportRoot(true);
+    doc.body.classList.add('wx-exporter-picture-print');
+  }
 
   let stats = { loaded: 0, failed: 0 };
 

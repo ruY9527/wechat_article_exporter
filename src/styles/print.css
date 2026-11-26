@@ -78,7 +78,7 @@ body > .weui-desktop-mp-mask {
 }
 
 /* 页面里除正文容器外的兄弟节点（侧栏、浮层、骨架屏）一并不打印 */
-body > *:not(#page-content):not(.rich_media_area_primary):not(.rich_media):not(main):not(script):not(style) {
+body > *:not(#page-content):not(.rich_media_area_primary):not(.rich_media):not(main):not(#wx-exporter-picture-root):not(#js_image_content):not(.share_notice):not(.js_share_content):not(#activity-name):not(#js_name):not(script):not(style) {
   display: none !important;
 }
 
@@ -551,4 +551,50 @@ a[href]::after { content: "" !important; }
 #js_content,
 #js_content * {
   overflow-x: visible !important;
+}
+
+/* 图片消息 / 小绿书：仅打印临时物化的线性正文，不操作原轮播布局 */
+body.wx-exporter-picture-print > *:not(#wx-exporter-picture-root):not(script):not(style) {
+  display: none !important;
+}
+#wx-exporter-picture-root {
+  display: block !important;
+  width: auto !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
+  color: #1a1a1a !important;
+  font-size: 11pt !important;
+  line-height: 1.6 !important;
+}
+#wx-exporter-picture-root header {
+  margin: 0 0 14pt !important;
+  padding: 0 0 8pt !important;
+  border-bottom: 0.5pt solid #e3e6ea !important;
+}
+#wx-exporter-picture-root header h1 {
+  margin: 0 0 6pt !important;
+  font-size: 17pt !important;
+  line-height: 1.35 !important;
+}
+#wx-exporter-picture-root p {
+  margin: 0 0 0.55em !important;
+}
+#wx-exporter-picture-root img {
+  display: block !important;
+  max-width: 100% !important;
+  width: auto !important;
+  height: auto !important;
+  max-height: 165mm !important;
+  margin: 10pt auto !important;
+  object-fit: contain !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+#wx-exporter-picture-root img[data-wx-img-broken] {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
 }

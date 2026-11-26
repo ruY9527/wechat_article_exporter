@@ -1,8 +1,8 @@
 {
   "name": "wechat-article-exporter",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "微信公众号文章导出助手：一键导出 Markdown（含本地图片 ZIP）与高保真 PDF 的 Chrome MV3 扩展",
+  "description": "微信公众号文章导出助手：Markdown、PDF、离线 HTML、EPUB 3 与长图 PNG 的零构建 Chrome MV3 扩展",
   "license": "MIT",
   "scripts": {
     "test": "node tests/run-tests.js && node tests/background-tests.js",

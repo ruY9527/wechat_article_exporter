@@ -13,18 +13,16 @@
           <img class="brand__icon" src="../icons/icon48.png" alt="" width="28" height="28" />
           <div class="brand__text">
             <h1 class="brand__title">公众号文章导出</h1>
-            <p class="brand__version">v1.1.0 · Markdown / PDF</p>
+            <p class="brand__version">v1.2.0 · Markdown / PDF / HTML / EPUB / PNG</p>
           </div>
         </div>
       </header>
 
-      <!-- 页面状态提示栏 -->
       <div id="page-status" class="status status--checking" role="status" aria-live="polite">
         <span class="status__dot" aria-hidden="true"></span>
         <span id="page-status-text" class="status__text">正在检测当前页面…</span>
       </div>
 
-      <!-- 导出选项区 -->
       <section class="options" aria-label="导出选项">
         <label class="option" for="opt-bundle">
           <input id="opt-bundle" type="checkbox" checked />
@@ -37,24 +35,64 @@
           <input id="opt-frontmatter" type="checkbox" checked />
           <span class="option__body">
             <span class="option__label">添加 YAML Front Matter 元信息头</span>
-            <span class="option__hint">包含标题、作者、日期与原文链接</span>
+            <span class="option__hint">包含标题、作者、日期、摘要与封面</span>
           </span>
         </label>
+        <details class="advanced-options">
+          <summary>更多解析与图片选项</summary>
+          <div class="advanced-options__body">
+            <label class="option" for="opt-webp">
+              <input id="opt-webp" type="checkbox" />
+              <span class="option__body">
+                <span class="option__label">WebP 自动转 PNG</span>
+                <span class="option__hint">本地转码，失败时保留原 WebP</span>
+              </span>
+            </label>
+            <label class="option" for="opt-media">
+              <input id="opt-media" type="checkbox" checked />
+              <span class="option__body">
+                <span class="option__label">保留音视频/卡片占位</span>
+                <span class="option__hint">以可读文本保留无法内嵌的微信卡片</span>
+              </span>
+            </label>
+            <label class="option" for="opt-comments">
+              <input id="opt-comments" type="checkbox" />
+              <span class="option__body">
+                <span class="option__label">附带导出精选评论</span>
+                <span class="option__hint">包含点赞数与作者回复</span>
+              </span>
+            </label>
+          </div>
+        </details>
       </section>
 
-      <!-- 主操作按钮 -->
-      <section class="actions">
+      <section class="actions" aria-label="导出操作">
         <button id="btn-markdown" class="btn btn--primary" type="button" disabled>
           <span class="btn__icon" aria-hidden="true">MD</span>
           <span class="btn__label">导出 Markdown</span>
+        </button>
+        <button id="btn-copy" class="btn btn--secondary" type="button" disabled>
+          <span class="btn__icon" aria-hidden="true">⧉</span>
+          <span class="btn__label">复制 Markdown</span>
         </button>
         <button id="btn-pdf" class="btn btn--secondary" type="button" disabled>
           <span class="btn__icon" aria-hidden="true">PDF</span>
           <span class="btn__label">导出 PDF</span>
         </button>
+        <button id="btn-html" class="btn btn--secondary" type="button" disabled>
+          <span class="btn__icon" aria-hidden="true">HTML</span>
+          <span class="btn__label">离线 HTML</span>
+        </button>
+        <button id="btn-epub" class="btn btn--secondary" type="button" disabled>
+          <span class="btn__icon" aria-hidden="true">EPUB</span>
+          <span class="btn__label">EPUB 电子书</span>
+        </button>
+        <button id="btn-long-png" class="btn btn--secondary" type="button" disabled>
+          <span class="btn__icon" aria-hidden="true">PNG</span>
+          <span class="btn__label">导出长图 PNG</span>
+        </button>
       </section>
 
-      <!-- 进度与状态反馈 -->
       <section id="progress" class="progress" hidden aria-live="polite">
         <div class="progress__bar">
           <div id="progress-fill" class="progress__fill" style="width: 0%"></div>
@@ -62,7 +100,7 @@
         <p id="progress-text" class="progress__text">准备中…</p>
       </section>
 
-      <p id="hint" class="hint" hidden></p>
+      <p id="hint" class="hint" hidden role="status"></p>
 
       <footer class="app__footer">
         <span>仅供个人归档使用 · 请遵守内容版权</span>

@@ -91,6 +91,8 @@ function createPage(html, options) {
     path.join(SRC, 'libs', 'turndown.js'),
     path.join(SRC, 'libs', 'turndown-plugin-gfm.js'),
     path.join(SRC, 'libs', 'jszip.min.js'),
+    path.join(SRC, 'converters', 'html.js'),
+    path.join(SRC, 'converters', 'epub.js'),
     path.join(SRC, 'content.js')
   ];
   files.forEach((file) => window.eval(fs.readFileSync(file, 'utf8')));
@@ -203,7 +205,8 @@ async function suiteConversion() {
   const doc = window.document;
 
   const beforeHtml = doc.querySelector('#js_content').innerHTML;
-  const container = api.extractContent(doc);
+  // 本套件验证旧噪声清理路径；富媒体默认占位行为由 TC-14 单独覆盖。
+  const container = api.extractContent(doc, { keepMediaPlaceholders: false });
   const markdown = api.convertHtmlToMarkdown(container, {});
 
   await test('代码块输出为带语言标识的围栏代码块', () => {
@@ -452,6 +455,392 @@ async function suiteExportMarkdown() {
 }
 
 /* ================================================================== */
+/* TC-12 ~ TC-16 v1.2 内容解析精度补全                                */
+/* ================================================================== */
+
+async function suiteStageOneParsing() {
+  section('TC-12 ~ TC-16 内联语义 / 元数据 / 媒体 / 图片消息 / 评论');
+
+  await test('TC-12：内联粗体、斜体、删除线与高亮转换为 Markdown 语义', () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    const markdown = api.convertHtmlToMarkdown(api.extractContent(dom.window.document), {});
+    assert.ok(markdown.includes('**粗体文本**'), markdown);
+    assert.ok(markdown.includes('*斜体文本*'), markdown);
+    assert.ok(markdown.includes('~~删除文本~~'), markdown);
+    assert.ok(markdown.includes('==高亮文本=='), markdown);
+    assert.ok(!markdown.includes('==白色背景不应高亮=='), '白色背景被误标为高亮');
+    assert.ok(!markdown.includes('==重要白色也不应高亮=='), '!important 白色被误标为高亮');
+    assert.ok(!markdown.includes('==全透明不应高亮=='), '0.0 透明度被误标为高亮');
+  });
+
+  await test('TC-12：标题与代码保护区不添加内联语义包裹', () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    const markdown = api.convertHtmlToMarkdown(api.extractContent(dom.window.document), {});
+    assert.ok(/^## 标题保持原样$/m.test(markdown), markdown);
+    assert.ok(markdown.includes('const answer = 42;'), '代码正文丢失');
+    assert.ok(!markdown.includes('**const answer'), '代码被误加粗');
+    assert.ok(!/^## \*\*标题/m.test(markdown), '标题被误加粗');
+  });
+
+  await test('TC-13：og 封面与摘要进入 Front Matter，脚本字段可兜底', () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    const meta = api.extractMetadata(dom.window.document, dom.window.location.href);
+    assert.strictEqual(meta.coverUrl, 'https://mmbiz.qpic.cn/mmbiz_jpg/COVER001/0?wx_fmt=jpeg');
+    assert.strictEqual(meta.description, '一篇用于验证语义、媒体与评论的 "精选" 文章');
+    const frontMatter = api.buildFrontMatter(meta);
+    assert.ok(frontMatter.includes('description: "一篇用于验证语义、媒体与评论的 \\"精选\\" 文章"'), frontMatter);
+    assert.ok(frontMatter.includes('cover: "https://mmbiz.qpic.cn/mmbiz_jpg/COVER001/0?wx_fmt=jpeg"'));
+
+    const fallback = createPage('<html><head><script>var msg_cdn_url = "//mmbiz.qpic.cn/cover.png?wx_fmt=png"; var msg_desc = "脚本 &amp; 摘要";</script></head><body><div id="js_content">正文</div></body></html>');
+    const fallbackMeta = fallback.window.__WX_EXPORTER_INTERNALS__.extractMetadata(fallback.window.document, fallback.window.location.href);
+    assert.strictEqual(fallbackMeta.coverUrl, 'https://mmbiz.qpic.cn/cover.png?wx_fmt=png');
+    assert.strictEqual(fallbackMeta.description, '脚本 & 摘要');
+  });
+
+  await test('TC-13：ZIP 下载封面并写入 images/cover.* 与本地 Front Matter', async () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    const result = await api.exportMarkdown({ bundleImages: true, frontMatter: true, download: false });
+    assert.ok(result.markdown.includes('cover: "./images/cover.jpg"'), result.markdown.slice(0, 500));
+    const zip = await dom.window.JSZip.loadAsync(result.zipBlob);
+    const cover = zip.file('images/cover.jpg');
+    assert.ok(cover, 'ZIP 缺少 images/cover.jpg');
+    assert.strictEqual(await cover.async('base64'), TINY_PNG_BASE64);
+  });
+
+  await test('TC-14：开启时音频、视频、名片和引用文章均保留占位', () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    const markdown = api.convertHtmlToMarkdown(api.extractContent(dom.window.document, { keepMediaPlaceholders: true }), {});
+    assert.ok(markdown.includes('[音频] 示例播客（1:05）'), markdown);
+    assert.ok(markdown.includes('[视频] [示例视频](https://mp.weixin.qq.com/video/example)'), markdown);
+    assert.ok(markdown.includes('[公众号名片] 示例账号：值得关注的账号'), markdown);
+    assert.ok(markdown.includes('[引用文章] [上一篇引用文章](https://mp.weixin.qq.com/s/REFERENCED)'), markdown);
+  });
+
+  await test('TC-14：关闭占位开关后沿用噪声剔除', () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    const markdown = api.convertHtmlToMarkdown(api.extractContent(dom.window.document, { keepMediaPlaceholders: false }), {});
+    ['[音频]', '[视频]', '[公众号名片]', '[引用文章]', '示例播客', '示例视频', '上一篇引用文章'].forEach((token) => {
+      assert.ok(!markdown.includes(token), '仍包含 ' + token);
+    });
+  });
+
+  await test('TC-15：图片消息 PING 支持且导出全部轮播图与短文', async () => {
+    const dom = createPage(readFixture('picture-message'));
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    let ping = null;
+    dom.window.chrome.__listeners[0]({ action: 'PING_PAGE' }, {}, (payload) => { ping = payload; });
+    assert.strictEqual(ping.supported, true);
+    const result = await api.exportMarkdown({ bundleImages: false, frontMatter: false, download: false });
+    assert.ok(result.markdown.includes('https://mmbiz.qpic.cn/mmbiz_jpg/PIC001/0?wx_fmt=jpeg'));
+    assert.ok(result.markdown.includes('https://mmbiz.qpic.cn/mmbiz_png/PIC002/0?wx_fmt=png'));
+    assert.ok(result.markdown.includes('第一站：沿江步道。'));
+    assert.ok(result.markdown.includes('第二站：旧书店。'));
+  });
+
+  await test('TC-15：纯脚本图片消息可解析 cdn_url 并去重', () => {
+    const dom = createPage('<html><body><div class="js_share_content">脚本短文</div><script>var picture_page_info_list = [{"cdn_url":"https:\\/\\/mmbiz.qpic.cn\\/a.png?wx_fmt=png"},{"cdn_url":"https:\\/\\/mmbiz.qpic.cn\\/a.png?wx_fmt=png"}];</script></body></html>');
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    const content = api.extractContent(dom.window.document);
+    assert.strictEqual(content.querySelectorAll('img').length, 1);
+    assert.ok(content.textContent.includes('脚本短文'));
+  });
+
+  await test('TC-15：正文已含轮播时最终图片节点按 URL 去重', () => {
+    const html = '<html><body><div id="js_content"><div class="share_media_swiper"><div class="swiper_item"><img data-src="https://mmbiz.qpic.cn/one.png?wx_fmt=png"></div></div><p>短文</p></div></body></html>';
+    const dom = createPage(html);
+    const content = dom.window.__WX_EXPORTER_INTERNALS__.extractContent(dom.window.document);
+    assert.strictEqual(content.querySelectorAll('img').length, 1);
+    assert.ok(content.textContent.includes('短文'));
+  });
+
+  await test('TC-15：图片消息 PDF 预热轮播图并进入打印路径', async () => {
+    const dom = createPage(readFixture('picture-message'));
+    const window = dom.window;
+    Object.defineProperty(window.HTMLImageElement.prototype, 'complete', { get: () => true, configurable: true });
+    Object.defineProperty(window.HTMLImageElement.prototype, 'naturalWidth', { get: () => 640, configurable: true });
+    let printed = false;
+    window.print = () => { printed = true; };
+    const result = await window.__WX_EXPORTER_INTERNALS__.exportPdf();
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.loaded, 2);
+    assert.ok(printed);
+    const temporary = window.document.getElementById('wx-exporter-picture-root');
+    assert.ok(temporary, '未物化线性正文');
+    const images = Array.from(temporary.querySelectorAll('img'));
+    assert.ok(images.every((img) => img.src.startsWith('https://mmbiz.qpic.cn/')));
+    window.dispatchEvent(new window.Event('afterprint'));
+    assert.ok(!window.document.getElementById('wx-exporter-picture-root'), '临时正文未清理');
+  });
+
+  await test('TC-15：图片消息长图包含轮播和短文，清理后恢复图片与样式', async () => {
+    const dom = createPage(readFixture('picture-message'));
+    const window = dom.window;
+    const api = window.__WX_EXPORTER_INTERNALS__;
+    const originals = Array.from(window.document.querySelectorAll('#js_image_content img'));
+    Object.defineProperty(window.HTMLImageElement.prototype, 'complete', { get: () => true, configurable: true });
+    Object.defineProperty(window.HTMLImageElement.prototype, 'naturalWidth', { get: () => 640, configurable: true });
+    window.scrollTo = () => {};
+    const pending = api.prepareLongScreenshot({});
+    const temporary = window.document.getElementById('wx-exporter-picture-root');
+    assert.ok(temporary);
+    temporary.getBoundingClientRect = () => ({ left: 0, top: 0, right: 750, bottom: 560, width: 750, height: 560 });
+    const prepared = await pending;
+    assert.strictEqual(prepared.ok, true);
+    assert.strictEqual(prepared.loaded, 2);
+    assert.strictEqual(prepared.clip.height, 560, 'clip 未包含物化短文');
+    assert.strictEqual(temporary.querySelectorAll('img').length, 2);
+    api.cleanupLongScreenshot();
+    assert.ok(originals.every((img) => img.getAttribute('src') === null), '原页面图片被改动');
+    assert.ok(!window.document.getElementById('wx-exporter-picture-root'));
+    assert.ok(!window.document.getElementById(api.SCREENSHOT_STYLE_ID));
+  });
+
+  await test('TC-15：纯脚本图片消息也能物化 PDF 与长图正文', async () => {
+    const dom = createPage('<html><body><div class="js_share_content">脚本短文</div><script>var picture_page_info_list=[{"cdn_url":"https:\\/\\/mmbiz.qpic.cn\\/a.png?wx_fmt=png"}];</script></body></html>');
+    const window = dom.window;
+    const api = window.__WX_EXPORTER_INTERNALS__;
+    Object.defineProperty(window.HTMLImageElement.prototype, 'complete', { get: () => true, configurable: true });
+    Object.defineProperty(window.HTMLImageElement.prototype, 'naturalWidth', { get: () => 640, configurable: true });
+    window.print = () => {};
+    const pdf = await api.exportPdf();
+    assert.strictEqual(pdf.loaded, 1);
+    window.dispatchEvent(new window.Event('afterprint'));
+    window.scrollTo = () => {};
+    const pending = api.prepareLongScreenshot({});
+    const temporary = window.document.getElementById('wx-exporter-picture-root');
+    temporary.getBoundingClientRect = () => ({ left: 0, top: 0, right: 750, bottom: 300, width: 750, height: 300 });
+    const prepared = await pending;
+    assert.strictEqual(prepared.loaded, 1);
+    assert.strictEqual(temporary.querySelectorAll('img').length, 1);
+    assert.ok(temporary.textContent.includes('脚本短文'));
+    api.cleanupLongScreenshot();
+  });
+
+  await test('TC-21：开启评论时长图 clip 包含正文外评论区', async () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const window = dom.window;
+    const api = window.__WX_EXPORTER_INTERNALS__;
+    window.scrollTo = () => {};
+    window.document.getElementById('js_content').getBoundingClientRect = () => ({ left: 0, top: 0, right: 750, bottom: 300, width: 750, height: 300 });
+    window.document.getElementById('js_cmt_list').getBoundingClientRect = () => ({ left: 0, top: 300, right: 750, bottom: 500, width: 750, height: 200 });
+    const prepared = await api.prepareLongScreenshot({ includeComments: true });
+    assert.strictEqual(prepared.clip.height, 500);
+    api.cleanupLongScreenshot();
+  });
+
+  await test('TC-16：开启时评论、点赞与作者回复追加到文末', async () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    const result = await api.exportMarkdown({ bundleImages: false, frontMatter: false, includeComments: true, download: false });
+    assert.ok(result.markdown.includes('## 精选评论'));
+    assert.ok(result.markdown.includes('> **热心读者**（👍 128）'));
+    assert.ok(result.markdown.includes('> 这篇整理很有帮助。'));
+    assert.ok(result.markdown.includes('> **作者回复**：谢谢支持，会继续更新。'));
+    assert.ok(result.markdown.indexOf('## 精选评论') > result.markdown.indexOf('正文结束。'));
+  });
+
+  await test('TC-16：默认及显式关闭时不输出评论', async () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const api = dom.window.__WX_EXPORTER_INTERNALS__;
+    const result = await api.exportMarkdown({ bundleImages: false, frontMatter: false, includeComments: false, download: false });
+    assert.ok(!result.markdown.includes('精选评论'));
+    assert.ok(!result.markdown.includes('热心读者'));
+  });
+}
+
+/* ================================================================== */
+/* TC-17 ~ TC-20 Copy MD / 离线 HTML / EPUB 3 / WebP                  */
+/* ================================================================== */
+
+async function suiteStageTwoExports() {
+  section('TC-17 ~ TC-20 Copy MD / 单文件 HTML / EPUB 3 / WebP');
+
+  await test('TC-17：COPY_MARKDOWN 返回完整文本且不触发图片或 ZIP 下载', async () => {
+    const chromeStub = createChromeStub();
+    const dom = createPage(readFixture('multi-image'), { chrome: chromeStub });
+    const response = await new Promise((resolve) => {
+      dom.window.chrome.__listeners[0]({
+        action: 'COPY_MARKDOWN',
+        settings: { bundleImages: true, frontMatter: true }
+      }, {}, resolve);
+    });
+    assert.strictEqual(response.ok, true);
+    assert.ok(response.markdown.includes('jpg 示例'));
+    assert.ok(response.markdown.includes('https://mmbiz.qpic.cn/mmbiz_png/AAA111/'));
+    assert.strictEqual(response.charCount, response.markdown.length);
+    assert.ok(response.title);
+    const actions = chromeStub.__sent.map((message) => message.action);
+    assert.ok(!actions.includes('FETCH_IMAGE'), 'Copy MD 不应下载图片');
+    assert.ok(!actions.includes('DOWNLOAD_DATA_URL'), 'Copy MD 不应保存文件');
+  });
+
+  await test('TC-18：离线 HTML 内联图片、CSS、元信息和完整正文', async () => {
+    const dom = createPage(readFixture('multi-image'));
+    const result = await dom.window.__WX_EXPORTER_INTERNALS__.exportHtml({ download: false });
+    assert.strictEqual(result.ok, true);
+    assert.ok(result.filename.endsWith('.html'));
+    assert.ok(result.html.includes('<meta name="viewport"'));
+    assert.ok(result.html.includes('<style>'), '缺少内联 CSS');
+    assert.ok(!/<link[^>]+stylesheet/i.test(result.html), '存在外部 CSS 依赖');
+    assert.ok(result.html.includes('data:image/png;base64,' + TINY_PNG_BASE64), '图片未内联');
+    assert.ok(result.html.includes('jpg 示例'), '正文不完整');
+    assert.ok(result.html.includes('<h1>'), '缺少文章标题');
+  });
+
+  await test('TC-18：离线 HTML 清除事件属性与危险 URL 并设置静态 CSP', async () => {
+    const html = '<html><body><h1 id="activity-name">静态文档</h1><div id="js_content"><p><a href="javascript:alert(1)">危险链接</a></p><p><img data-src="https://mmbiz.qpic.cn/safe.png?wx_fmt=png" onerror="alert(2)"></p></div></body></html>';
+    const dom = createPage(html);
+    const result = await dom.window.__WX_EXPORTER_INTERNALS__.exportHtml({ download: false });
+    assert.ok(!/javascript:|onerror\s*=|onclick\s*=/i.test(result.html), result.html);
+    assert.ok(result.html.includes('Content-Security-Policy'));
+    assert.ok(result.html.includes("script-src 'none'"));
+  });
+
+  await test('TC-19：EPUB 3 包结构完整、mimetype 未压缩且 XHTML 严格良构', async () => {
+    const dom = createPage(readFixture('tech-article'));
+    const result = await dom.window.__WX_EXPORTER_INTERNALS__.exportEpub({ download: false, includeComments: false });
+    assert.strictEqual(result.ok, true);
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new dom.window.FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(result.epubBlob);
+    });
+    const buffer = Buffer.from(String(dataUrl).split(',')[1], 'base64');
+    assert.strictEqual(buffer.readUInt16LE(8), 0, '首个 mimetype 条目的压缩方法不是 STORE');
+    const JSZip = require(path.join(SRC, 'libs', 'jszip.min.js'));
+    const zip = await JSZip.loadAsync(buffer);
+    [
+      'mimetype', 'META-INF/container.xml', 'OEBPS/content.opf', 'OEBPS/nav.xhtml',
+      'OEBPS/toc.ncx', 'OEBPS/chapter1.xhtml', 'OEBPS/styles/book.css'
+    ].forEach((name) => assert.ok(zip.file(name), 'EPUB 缺少 ' + name));
+    assert.strictEqual(await zip.file('mimetype').async('string'), 'application/epub+zip');
+    assert.ok(Object.keys(zip.files).some((name) => /^OEBPS\/images\/img_\d+\./.test(name)), '缺少正文图片');
+    const opf = await zip.file('OEBPS/content.opf').async('string');
+    assert.ok(opf.includes('properties="nav"'));
+    assert.ok(opf.includes('<spine toc="ncx">'));
+    const chapter = await zip.file('OEBPS/chapter1.xhtml').async('string');
+    for (const name of ['OEBPS/content.opf', 'OEBPS/nav.xhtml', 'OEBPS/toc.ncx', 'OEBPS/chapter1.xhtml']) {
+      const xml = await zip.file(name).async('string');
+      const document = new dom.window.DOMParser().parseFromString(xml, 'application/xml');
+      assert.strictEqual(document.querySelectorAll('parsererror').length, 0, name + ' XML 不良构');
+    }
+    const parsed = new dom.window.DOMParser().parseFromString(chapter, 'application/xml');
+    assert.strictEqual(parsed.querySelectorAll('parsererror').length, 0,
+      parsed.querySelector('parsererror') && parsed.querySelector('parsererror').textContent);
+    assert.ok(chapter.includes('id="heading-1"'), '标题锚点未生成');
+  });
+
+  await test('TC-19：EPUB 保留既有锚点并避开全文重复 ID', async () => {
+    const dom = createPage(readFixture('tech-article'));
+    const converter = dom.window.__WX_EPUB_CONVERTER__;
+    const element = dom.window.document.createElement('div');
+    element.innerHTML = '<a href="#a&amp;b">跳转</a><h2 id="a&amp;b">原标题</h2><span id="heading-1">占用</span><h2>新标题</h2>';
+    const toc = converter.extractHeadingsForToc(element);
+    assert.strictEqual(toc[0].id, 'a&b');
+    assert.strictEqual(toc[1].id, 'heading-2');
+    assert.strictEqual(element.querySelector('a').getAttribute('href'), '#a&b');
+    const xhtml = converter.serializeToXhtml(element);
+    assert.strictEqual((xhtml.match(/id="heading-2"/g) || []).length, 1);
+    assert.ok(!xhtml.includes('<h2 id="heading-1"'));
+    const buffer = await converter.buildEpubZip({
+      JSZip: dom.window.JSZip,
+      meta: { title: '特殊锚点' },
+      contentElement: element,
+      imageResults: [],
+      outputType: 'arraybuffer'
+    });
+    const zip = await dom.window.JSZip.loadAsync(buffer);
+    for (const name of ['OEBPS/nav.xhtml', 'OEBPS/toc.ncx']) {
+      const xml = await zip.file(name).async('string');
+      const parsed = new dom.window.DOMParser().parseFromString(xml, 'application/xml');
+      assert.strictEqual(parsed.querySelectorAll('parsererror').length, 0, name + ' 特殊 ID 未转义');
+      assert.ok(xml.includes('chapter1.xhtml#a%26b'), name + ' fragment 未 URI 编码');
+    }
+  });
+
+  await test('TC-19：EPUB 下载失败图片改为包内文本占位，不遗留远程 img', async () => {
+    const failUrl = 'https://mmbiz.qpic.cn/mmbiz_jpg/BBB222/0?wx_fmt=jpeg&tp=webp';
+    const dom = createPage(readFixture('multi-image'), { chrome: createChromeStub({ failUrls: [failUrl] }) });
+    const result = await dom.window.__WX_EXPORTER_INTERNALS__.exportEpub({ download: false });
+    assert.strictEqual(result.imageFailed, 1);
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new dom.window.FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(result.epubBlob);
+    });
+    const JSZip = require(path.join(SRC, 'libs', 'jszip.min.js'));
+    const zip = await JSZip.loadAsync(Buffer.from(String(dataUrl).split(',')[1], 'base64'));
+    const chapter = await zip.file('OEBPS/chapter1.xhtml').async('string');
+    assert.ok(chapter.includes('[图片未收录]'));
+    assert.ok(!/<img[^>]+src="https?:\/\//.test(chapter), chapter.match(/<img[^>]+>/g));
+    const parsed = new dom.window.DOMParser().parseFromString(chapter, 'application/xml');
+    assert.strictEqual(parsed.querySelectorAll('p p').length, 0, '图片占位生成嵌套段落');
+    assert.ok(parsed.querySelector('[data-wx-image-fallback]').namespaceURI.includes('xhtml'));
+  });
+
+  await test('TC-19：EPUB 注册封面资源并追加精选评论', async () => {
+    const dom = createPage(readFixture('semantic-and-media'));
+    const result = await dom.window.__WX_EXPORTER_INTERNALS__.exportEpub({ download: false, includeComments: true });
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new dom.window.FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(result.epubBlob);
+    });
+    const JSZip = require(path.join(SRC, 'libs', 'jszip.min.js'));
+    const zip = await JSZip.loadAsync(Buffer.from(String(dataUrl).split(',')[1], 'base64'));
+    assert.ok(zip.file('OEBPS/images/cover.jpg'));
+    const opf = await zip.file('OEBPS/content.opf').async('string');
+    assert.ok(opf.includes('id="cover-image"'));
+    assert.ok(opf.includes('properties="cover-image"'));
+    assert.ok(opf.includes('<dc:description>一篇用于验证语义、媒体与评论的 &quot;精选&quot; 文章</dc:description>'));
+    const chapter = await zip.file('OEBPS/chapter1.xhtml').async('string');
+    assert.ok(chapter.includes('class="wx-comments"'));
+    assert.ok(chapter.includes('谢谢支持，会继续更新。'));
+  });
+
+  await test('TC-20：WebP 经统一下载管线转 PNG 并释放位图', async () => {
+    const dom = createPage(readFixture('multi-image'));
+    const window = dom.window;
+    let closed = false;
+    let drawn = false;
+    window.createImageBitmap = async () => ({ width: 1, height: 1, close: () => { closed = true; } });
+    window.OffscreenCanvas = class {
+      getContext() { return { drawImage: () => { drawn = true; } }; }
+      async convertToBlob() {
+        return new window.Blob([Buffer.from(TINY_PNG_BASE64, 'base64')], { type: 'image/png' });
+      }
+    };
+    const results = await window.__WX_EXPORTER_INTERNALS__.downloadImages([
+      { url: 'https://mmbiz.qpic.cn/test.webp?wx_fmt=webp', ext: 'webp' }
+    ], null, { convertWebp: true });
+    assert.ok(drawn, '未进入 Canvas 转码路径');
+    assert.ok(closed, 'ImageBitmap 未释放');
+    assert.strictEqual(results[0].ext, 'png');
+    assert.strictEqual(results[0].mime, 'image/png');
+    assert.strictEqual(results[0].base64, TINY_PNG_BASE64);
+  });
+
+  await test('TC-20：转码异常原样回退 WebP，不中断导出', async () => {
+    const dom = createPage(readFixture('multi-image'));
+    dom.window.createImageBitmap = async () => { throw new Error('模拟解码失败'); };
+    const original = { ok: true, ext: 'webp', mime: 'image/webp', base64: 'V0VCUA==' };
+    const result = await dom.window.__WX_EXPORTER_INTERNALS__.maybeConvertWebp(original, true);
+    assert.strictEqual(result, original);
+    assert.strictEqual(result.ext, 'webp');
+    assert.strictEqual(result.base64, 'V0VCUA==');
+  });
+}
+
+/* ================================================================== */
 /* TC-09 / TC-10 PDF 打印样式与现场恢复                               */
 /* ================================================================== */
 
@@ -627,6 +1016,36 @@ async function suitePopup() {
     assert.strictEqual(window.document.getElementById('btn-pdf').disabled, false, '按钮未启用');
   });
 
+  await test('Popup 六按钮顺序、两列网格与折叠高级选项符合 v1.2', async () => {
+    const { window } = await bootPopup({ url: 'https://mp.weixin.qq.com/s/abc123' });
+    const ids = Array.from(window.document.querySelectorAll('.actions button')).map((button) => button.id);
+    assert.deepStrictEqual(ids, ['btn-markdown', 'btn-copy', 'btn-pdf', 'btn-html', 'btn-epub', 'btn-long-png']);
+    const details = window.document.querySelector('details.advanced-options');
+    assert.ok(details && !details.open, '高级选项应默认折叠');
+    ['opt-webp', 'opt-media', 'opt-comments'].forEach((id) => assert.ok(details.contains(window.document.getElementById(id))));
+    const css = fs.readFileSync(path.join(SRC, 'popup', 'popup.css'), 'utf8');
+    assert.ok(/\.actions\s*\{[^}]*grid-template-columns:\s*1fr 1fr/s.test(css), '操作区不是两列网格');
+  });
+
+  await test('TC-17：Popup 点击复制后写入 Clipboard 并恢复按钮状态', async () => {
+    const { window, chromeStub } = await bootPopup({ url: 'https://mp.weixin.qq.com/s/abc123' });
+    chromeStub.tabs.sendMessage = (_id, message, callback) => {
+      if (message.action === 'COPY_MARKDOWN') {
+        setTimeout(() => callback({ ok: true, markdown: '# 完整 Markdown', charCount: 12, title: '测试' }), 10);
+      } else callback({ ok: true, supported: true });
+    };
+    let copied = '';
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text) => { copied = text; } }
+    });
+    window.document.getElementById('btn-copy').click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.strictEqual(copied, '# 完整 Markdown');
+    assert.strictEqual(window.document.getElementById('btn-copy').disabled, false);
+    assert.ok(window.document.getElementById('hint').textContent.includes('已复制 Markdown'));
+  });
+
   await test('内容脚本未就绪：提示刷新页面并保持禁用', async () => {
     const { window } = await bootPopup({ url: 'https://mp.weixin.qq.com/s/abc123', contentReady: false });
     assert.ok(/未检测到文章正文/.test(window.document.getElementById('page-status-text').textContent), '提示文案不正确');
@@ -636,10 +1055,19 @@ async function suitePopup() {
   await test('读取已保存偏好（TC-11 读取侧）', async () => {
     const { window } = await bootPopup({
       url: 'https://mp.weixin.qq.com/s/abc123',
-      storage: { wxExporterSettings: { bundleImages: false, frontMatter: false } }
+      storage: { wxExporterSettings: {
+        bundleImages: false,
+        frontMatter: false,
+        convertWebp: true,
+        keepMediaPlaceholders: false,
+        includeComments: true
+      } }
     });
     assert.strictEqual(window.document.getElementById('opt-bundle').checked, false, 'bundleImages 未恢复');
     assert.strictEqual(window.document.getElementById('opt-frontmatter').checked, false, 'frontMatter 未恢复');
+    assert.strictEqual(window.document.getElementById('opt-webp').checked, true, 'convertWebp 未恢复');
+    assert.strictEqual(window.document.getElementById('opt-media').checked, false, 'keepMediaPlaceholders 未恢复');
+    assert.strictEqual(window.document.getElementById('opt-comments').checked, true, 'includeComments 未恢复');
   });
 
   await test('切换选项后写入 chrome.storage.local（TC-11 写入侧）', async () => {
@@ -652,6 +1080,14 @@ async function suitePopup() {
     assert.ok(saved, '未写入设置');
     assert.strictEqual(saved.frontMatter, false, '写入值不正确');
     assert.strictEqual(saved.bundleImages, true, '其他项被误改');
+    assert.strictEqual(saved.convertWebp, false, 'WebP 默认值未持久化');
+    assert.strictEqual(saved.keepMediaPlaceholders, true, '媒体占位默认值未持久化');
+    assert.strictEqual(saved.includeComments, false, '评论默认值未持久化');
+    const comments = window.document.getElementById('opt-comments');
+    comments.checked = true;
+    comments.dispatchEvent(new window.Event('change'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.strictEqual(chromeStub.storage.local._data.wxExporterSettings.includeComments, true, '评论开关未写入');
   });
 }
 
@@ -736,11 +1172,17 @@ async function suiteStructure() {
   await test('manifest.json 可解析且关键字段正确', () => {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     assert.strictEqual(manifest.manifest_version, 3);
-    assert.deepStrictEqual(manifest.permissions.sort(), ['activeTab', 'downloads', 'storage']);
+    assert.deepStrictEqual(manifest.permissions.sort(), ['activeTab', 'clipboardWrite', 'downloads', 'storage']);
     assert.ok(manifest.host_permissions.includes('https://mp.weixin.qq.com/*'));
     assert.ok(manifest.host_permissions.includes('https://mmbiz.qpic.cn/*'));
     assert.strictEqual(manifest.action.default_popup, 'popup/popup.html');
     assert.strictEqual(manifest.background.service_worker, 'background.js');
+    assert.deepStrictEqual(manifest.optional_permissions, ['debugger']);
+    assert.ok(!manifest.permissions.includes('debugger'), 'debugger 必须仅为可选权限');
+    assert.deepStrictEqual(manifest.content_scripts[0].js, [
+      'libs/turndown.js', 'libs/turndown-plugin-gfm.js', 'libs/jszip.min.js',
+      'converters/html.js', 'converters/epub.js', 'content.js'
+    ]);
   });
 
   await test('manifest 中声明的每个文件都真实存在', () => {
@@ -773,6 +1215,7 @@ async function suiteStructure() {
       'page-break-inside: avoid',
       '#js_pc_qr_code',
       'data-wx-img-broken',
+      '#wx-exporter-picture-root',
       'white-space: normal !important'
     ].forEach((token) => {
       assert.ok(contentSrc.includes(token), 'content.js 缺少: ' + token);
@@ -808,6 +1251,8 @@ async function suiteStructure() {
   await suiteConversion();
   await suiteImagesAndFilename();
   await suiteExportMarkdown();
+  await suiteStageOneParsing();
+  await suiteStageTwoExports();
   await suiteLongArticle();
   await suitePrint();
   await suitePopup();

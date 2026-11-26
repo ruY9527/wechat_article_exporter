@@ -24,6 +24,8 @@
   /* ================================================================ */
 
   const PRINT_STYLE_ID = 'wx-exporter-print-style';
+  const SCREENSHOT_STYLE_ID = 'wx-exporter-screenshot-style';
+  const PICTURE_EXPORT_ROOT_ID = 'wx-exporter-picture-root';
   const IMAGE_DIR = 'images';
   const IMAGE_CONCURRENCY = 5;      // 设计文档 4.2：并发池 5
   const IMAGE_TIMEOUT_MS = 10000;   // 设计文档 4.2：单图 10s 超时
@@ -74,6 +76,7 @@
     'mp-common-miniprogram',
     'mp-miniprogram',
     'mpaudio',
+    'mp-common-mpaudio',
     'mpvoice',
     'qqmusic',
     '.js_weapp_element',
@@ -87,6 +90,7 @@
     '.js_fold_btn',
     '.js_underline_content',
     '.article_wx_music',
+    '.js_tx_video_container',
     '.js_cmt_area'
   ];
 
@@ -213,6 +217,15 @@
       const el = d.querySelector(selector);
       return el ? normalizeInlineText(el.innerText || el.textContent) : '';
     };
+    const pickMeta = (selector) => {
+      const el = d.querySelector(selector);
+      return el ? normalizeInlineText(el.getAttribute('content')) : '';
+    };
+    const scripts = Array.from(d.querySelectorAll('script')).map((el) => el.textContent || '').join('\n');
+    const matchScript = (name) => {
+      const match = scripts.match(new RegExp('var\\s+' + name + '\\s*=\\s*["\\\']([^"\\\']+)["\\\']'));
+      return match ? decodeHtmlEntities(match[1]) : '';
+    };
 
     const title = pick('#activity-name') || normalizeInlineText(d.title) || '未命名文章';
 
@@ -226,6 +239,13 @@
     const author = pick('.rich_media_meta_text') || pick('#js_author_name') || '';
 
     const publishTime = pick('#publish_time') || pick('.rich_media_meta.rich_media_meta_text') || '';
+    const rawCover = pickMeta('meta[property="og:image"]') ||
+      pickMeta('meta[name="twitter:image"]') ||
+      matchScript('msg_cdn_url');
+    const coverUrl = rawCover && !isPlaceholderImage(rawCover) ? normalizeUrl(rawCover) : '';
+    const description = pickMeta('meta[property="og:description"]') ||
+      pickMeta('meta[name="description"]') ||
+      normalizeInlineText(matchScript('msg_desc'));
 
     return {
       title,
@@ -233,7 +253,9 @@
       author,
       publishTime,
       publishDate: toIsoDate(publishTime),
-      sourceUrl: href || window.location.href
+      sourceUrl: href || window.location.href,
+      coverUrl,
+      description
     };
   }
 
@@ -261,26 +283,306 @@
     return n < 10 ? '0' + n : String(n);
   }
 
+  /** 把微信内联排版样式转换为可跨格式保留的语义标签。 */
+  function preserveInlineSemanticStyles(root) {
+    const nodes = Array.from(root.querySelectorAll('span, p, section, font, b, i, s, strike'));
+    const protectedSelector = '[data-wx-code], [data-formula], [data-latex], h1, h2, h3, h4, h5, h6';
+
+    const declarationsFor = (el) => {
+      const declarations = Object.create(null);
+      String(el.getAttribute('style') || '').toLowerCase().replace(/\s+/g, '').split(';').forEach((part) => {
+        const colon = part.indexOf(':');
+        if (colon <= 0) return;
+        declarations[part.slice(0, colon)] = part.slice(colon + 1);
+      });
+      return declarations;
+    };
+    const wrapChildren = (el, tagName) => {
+      if (!el.childNodes.length) return;
+      const wrapper = el.ownerDocument.createElement(tagName);
+      while (el.firstChild) wrapper.appendChild(el.firstChild);
+      el.appendChild(wrapper);
+    };
+    const hasHighlightColor = (value) => {
+      const color = String(value || '').trim().replace(/!important$/, '');
+      if (!color || /url\(/.test(color)) return false;
+      if (/^(?:transparent|none|inherit|initial|unset|#fff(?:fff)?|white)$/.test(color)) return false;
+      const rgb = color.match(/^rgba?\(([^)]+)\)$/);
+      if (rgb) {
+        const components = rgb[1].split(/[,/]/).map((part) => part.trim()).filter(Boolean);
+        if (components.length >= 3 && components.slice(0, 3).every((part) => Number(part) === 255)) return false;
+        if (components.length >= 4) {
+          const alpha = components[3].endsWith('%') ? Number.parseFloat(components[3]) / 100 : Number(components[3]);
+          if (Number.isFinite(alpha) && alpha === 0) return false;
+        }
+      }
+      return true;
+    };
+
+    nodes.forEach((el) => {
+      if (el.closest(protectedSelector)) return;
+      const style = declarationsFor(el);
+      const weight = style['font-weight'] || '';
+      const numericWeight = Number.parseInt(weight, 10);
+      const bold = /^(?:bold|bolder)$/.test(weight) || (Number.isFinite(numericWeight) && numericWeight >= 600);
+      const italic = /^(?:italic|oblique)$/.test(style['font-style'] || '');
+      const decoration = (style['text-decoration'] || '') + ';' + (style['text-decoration-line'] || '');
+      const strike = decoration.includes('line-through');
+      const background = style['background-color'] || style.background || '';
+
+      if (bold && !el.closest('strong, b')) wrapChildren(el, 'strong');
+      if (italic && !el.closest('em, i')) wrapChildren(el, 'em');
+      if (strike && !el.closest('del, s, strike')) wrapChildren(el, 'del');
+      if (hasHighlightColor(background) && !el.closest('mark')) wrapChildren(el, 'mark');
+    });
+  }
+
+  /** 将微信富媒体节点转换为后续清洗不会误删的语义占位块。 */
+  function convertMediaCardsToPlaceholders(root) {
+    const selector = [
+      'mpvoice', 'mpaudio', 'qqmusic', '.article_wx_music',
+      'video', 'iframe.video_iframe', '.js_tx_video_container',
+      'mp-common-profile', '.mp_profile_iframe', '.mp_profile_iframe_wrp',
+      '.appmsg_card_context', 'mp-common-mpaudio',
+      'a.appmsg_card[href]', '.appmsg_card[href]'
+    ].join(', ');
+    const candidates = Array.from(root.querySelectorAll(selector));
+    const claimed = new Set();
+
+    const replaceWithPlaceholder = (el, build) => {
+      const doc = el.ownerDocument;
+      const blockquote = doc.createElement('blockquote');
+      blockquote.setAttribute('data-wx-placeholder', '1');
+      const paragraph = doc.createElement('p');
+      build(paragraph, doc);
+      blockquote.appendChild(paragraph);
+      el.parentNode.replaceChild(blockquote, el);
+    };
+    const text = (el, selectors) => {
+      for (const query of selectors) {
+        const target = el.matches(query) ? el : el.querySelector(query);
+        const value = target && normalizeInlineText(target.textContent);
+        if (value) return value;
+      }
+      return '';
+    };
+
+    candidates.forEach((el) => {
+      if (!el.parentNode) return;
+      for (let parent = el.parentElement; parent && parent !== root; parent = parent.parentElement) {
+        if (claimed.has(parent)) return;
+      }
+      claimed.add(el);
+
+      if (el.matches('mpvoice, mpaudio, qqmusic, .article_wx_music')) {
+        const title = normalizeInlineText(el.getAttribute('name') || el.getAttribute('title')) ||
+          text(el, ['.audio_card_title']) || '微信音频';
+        const milliseconds = Number(el.getAttribute('play_length') || 0);
+        let duration = '';
+        if (Number.isFinite(milliseconds) && milliseconds > 0) {
+          const seconds = Math.floor(milliseconds / 1000);
+          duration = Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+        }
+        replaceWithPlaceholder(el, (p) => {
+          p.textContent = '[音频] ' + title + (duration ? '（' + duration + '）' : '');
+        });
+        return;
+      }
+
+      if (el.matches('video, iframe.video_iframe, .js_tx_video_container')) {
+        const link = normalizeUrl(el.getAttribute('data-src') || el.getAttribute('src') || '');
+        const title = normalizeInlineText(el.getAttribute('title') || el.getAttribute('data-title')) || '微信视频';
+        replaceWithPlaceholder(el, (p, doc) => {
+          p.appendChild(doc.createTextNode('[视频] '));
+          if (/^https?:\/\//i.test(link)) {
+            const anchor = doc.createElement('a');
+            anchor.setAttribute('href', link);
+            anchor.textContent = title;
+            p.appendChild(anchor);
+          } else {
+            p.appendChild(doc.createTextNode(title));
+          }
+        });
+        return;
+      }
+
+      if (el.matches('mp-common-profile, .mp_profile_iframe, .mp_profile_iframe_wrp')) {
+        const name = normalizeInlineText(el.getAttribute('data-nickname')) || text(el, ['.profile_nickname']) || '微信公众号';
+        const description = normalizeInlineText(el.getAttribute('data-desc')) || text(el, ['.profile_meta_value']);
+        replaceWithPlaceholder(el, (p) => {
+          p.textContent = '[公众号名片] ' + name + (description ? '：' + description : '');
+        });
+        return;
+      }
+
+      const anchor = el.matches('a[href]') ? el : el.querySelector('a[href]');
+      const href = anchor ? normalizeUrl(anchor.getAttribute('href') || '') : '';
+      const title = text(el, ['.appmsg_card_title']) ||
+        normalizeInlineText(anchor && anchor.textContent) || normalizeInlineText(el.textContent) || '引用文章';
+      replaceWithPlaceholder(el, (p, doc) => {
+        p.appendChild(doc.createTextNode('[引用文章] '));
+        if (href) {
+          const link = doc.createElement('a');
+          link.setAttribute('href', href);
+          link.textContent = title;
+          p.appendChild(link);
+        } else {
+          p.appendChild(doc.createTextNode(title));
+        }
+      });
+    });
+  }
+
+  function isPictureMessagePage(doc) {
+    const d = doc || document;
+    if (d.querySelector('#js_image_content, .share_media_swiper, .swiper_item img')) return true;
+    return Array.from(d.querySelectorAll('script')).some((script) => /picture_page_info_list/.test(script.textContent || ''));
+  }
+
+  /** 标准化图片消息为“轮播图 + 短文”，继续复用普通文章导出管线。 */
+  function extractPictureMessageContent(doc) {
+    const d = doc || document;
+    const virtual = d.createElement('div');
+    virtual.setAttribute('data-wx-picture-message', '1');
+    const urls = [];
+    const addUrl = (raw) => {
+      let value = decodeHtmlEntities(String(raw || '').trim()).replace(/\\\//g, '/');
+      value = normalizeUrl(value);
+      if (!value || isPlaceholderImage(value) || urls.includes(value)) return;
+      urls.push(value);
+    };
+
+    d.querySelectorAll('.swiper_item img, .share_media_swiper img, #img_list img').forEach((img) => {
+      addUrl(img.getAttribute('data-src') || img.getAttribute('src'));
+    });
+    if (!urls.length) {
+      const scripts = Array.from(d.querySelectorAll('script')).map((script) => script.textContent || '').join('\n');
+      const pattern = /["']cdn_url["']\s*:\s*["']([^"']+)["']/g;
+      let match;
+      while ((match = pattern.exec(scripts))) addUrl(match[1]);
+    }
+
+    urls.forEach((url) => {
+      const paragraph = d.createElement('p');
+      paragraph.setAttribute('data-wx-picture', '1');
+      const image = d.createElement('img');
+      image.setAttribute('data-src', url);
+      paragraph.appendChild(image);
+      virtual.appendChild(paragraph);
+    });
+
+    const textRoot = d.querySelector('#js_content') || d.querySelector('.share_notice') || d.querySelector('.js_share_content');
+    if (textRoot) {
+      const textClone = textRoot.cloneNode(true);
+      textClone.querySelectorAll('.swiper_item, .share_media_swiper, #img_list').forEach((el) => el.remove());
+      while (textClone.firstChild) virtual.appendChild(textClone.firstChild);
+    }
+
+    // 常规正文已带轮播时只保留标准化节点，避免重复导出同一 URL。
+    const seen = new Set();
+    Array.from(virtual.querySelectorAll('img')).forEach((img) => {
+      const url = resolveImageUrl(img);
+      if (!url || seen.has(url)) img.remove();
+      else seen.add(url);
+    });
+    return virtual;
+  }
+
+  function extractComments(doc) {
+    const d = doc || document;
+    return Array.from(d.querySelectorAll('#js_cmt_list .discuss_item, .discuss_list .discuss_item')).map((item) => {
+      const pick = (selectors) => {
+        const el = item.querySelector(selectors);
+        return el ? normalizeInlineText(el.textContent) : '';
+      };
+      const replies = Array.from(item.querySelectorAll('.reply_result, .discuss_extra_info')).map((reply) => {
+        const authorNode = reply.querySelector('.nickname, .discuss_nick_name, .reply_nickname');
+        const contentNode = reply.querySelector('.discuss_message_content, .reply_content');
+        return {
+          author: normalizeInlineText(authorNode && authorNode.textContent) || '作者',
+          content: normalizeInlineText(contentNode ? contentNode.textContent : reply.textContent)
+        };
+      }).filter((reply) => reply.content);
+      const likes = Number.parseInt(pick('.praise_num').replace(/[^\d]/g, ''), 10);
+      return {
+        author: pick('.nickname, .discuss_nick_name') || '微信用户',
+        likes: Number.isFinite(likes) ? likes : 0,
+        content: pick('.discuss_message_content'),
+        replies
+      };
+    }).filter((comment) => comment.content);
+  }
+
+  function formatCommentsMarkdown(comments) {
+    if (!Array.isArray(comments) || !comments.length) return '';
+    const lines = ['---', '', '## 精选评论', ''];
+    comments.forEach((comment) => {
+      lines.push('> **' + comment.author + '**（👍 ' + comment.likes + '）');
+      lines.push('> ' + comment.content);
+      if (comment.replies.length) lines.push('>');
+      comment.replies.forEach((reply, index) => {
+        lines.push('> **' + (reply.author || '作者') + '回复**：' + reply.content);
+        if (index < comment.replies.length - 1) lines.push('>');
+      });
+      lines.push('');
+    });
+    return lines.join('\n').replace(/\n+$/, '') + '\n';
+  }
+
+  function buildCommentsHtml(comments) {
+    if (!Array.isArray(comments) || !comments.length) return '';
+    const section = document.createElement('section');
+    section.setAttribute('class', 'wx-comments');
+    const heading = document.createElement('h2');
+    heading.textContent = '精选评论';
+    section.appendChild(heading);
+    comments.forEach((comment) => {
+      const article = document.createElement('article');
+      article.setAttribute('class', 'wx-comment');
+      const author = document.createElement('h3');
+      author.textContent = comment.author + '（👍 ' + comment.likes + '）';
+      const content = document.createElement('p');
+      content.textContent = comment.content;
+      article.appendChild(author);
+      article.appendChild(content);
+      comment.replies.forEach((reply) => {
+        const blockquote = document.createElement('blockquote');
+        blockquote.setAttribute('class', 'wx-comment-reply');
+        blockquote.textContent = (reply.author || '作者') + '回复：' + reply.content;
+        article.appendChild(blockquote);
+      });
+      section.appendChild(article);
+    });
+    return section.outerHTML;
+  }
+
   /**
    * 克隆正文并清洗（不触碰原页面 DOM）
    * @param {Document} [doc]
    * @returns {Element}
    */
-  function extractContent(doc) {
+  function extractContent(doc, options) {
     const d = doc || document;
-    const raw = d.querySelector('#js_content') || d.querySelector('.rich_media_content');
+    const opts = options || {};
+    const pictureMessage = isPictureMessagePage(d);
+    const raw = pictureMessage
+      ? extractPictureMessageContent(d)
+      : (d.querySelector('#js_content') || d.querySelector('.rich_media_content'));
     if (!raw) {
       throw new Error('未找到文章正文容器（#js_content），请确认当前页面是公众号文章详情页');
     }
 
     const clone = raw.cloneNode(true);
 
-    // 1) 移除噪声节点
+    // 1) 在噪声清理前把可保留的富媒体转换为语义占位块
+    if (opts.keepMediaPlaceholders !== false) convertMediaCardsToPlaceholders(clone);
+
+    // 2) 移除噪声节点
     NOISE_SELECTORS.forEach((selector) => {
       clone.querySelectorAll(selector).forEach((el) => el.parentNode && el.parentNode.removeChild(el));
     });
 
-    // 2) 移除隐藏节点（保留公式容器）
+    // 3) 移除隐藏节点（保留公式容器）
     pruneHiddenNodes(clone);
 
     // 3) 移除注释节点
@@ -293,12 +595,28 @@
     //    （class 会被统一清除；不预先标记，Turndown 规则将无法识别微信代码块 / 公式块级属性）
     markStructuralHints(clone);
 
-    // 5) 表格补表头：GFM 只支持「表头 + 数据行」，
+    // 5) 在内联样式被清除前保留粗体、斜体、删除线与高亮语义
+    preserveInlineSemanticStyles(clone);
+
+    // 6) 表格补表头：GFM 只支持「表头 + 数据行」，
     //    微信编辑器常用 <td> 直接写第一行表头，这里把首行提升为 <th>
     promoteTableHeaders(clone);
 
-    // 6) 清掉微信遗留的排版属性，避免转换出奇怪结构
+    // 6) 清掉微信遗留的排版属性与主动内容，保证离线 HTML/EPUB 为静态文档
     clone.querySelectorAll('*').forEach((el) => {
+      Array.from(el.attributes).forEach((attribute) => {
+        const name = attribute.name.toLowerCase();
+        if (/^on/.test(name) || name === 'srcdoc') {
+          el.removeAttribute(attribute.name);
+          return;
+        }
+        if (!['href', 'src', 'xlink:href', 'formaction'].includes(name)) return;
+        const value = decodeHtmlEntities(attribute.value).replace(/[\u0000-\u0020]/g, '').toLowerCase();
+        if (/^(?:javascript|vbscript):/.test(value) ||
+            (value.startsWith('data:') && !/^data:image\/(?:png|gif|jpe?g|webp);base64,/.test(value))) {
+          el.removeAttribute(attribute.name);
+        }
+      });
       el.removeAttribute('style');
       el.removeAttribute('class');
       el.removeAttribute('data-style');
@@ -320,6 +638,30 @@
       });
 
     return clone;
+  }
+
+  /** 将图片消息物化为线性临时正文，供 PDF/长图复用统一解析结果。 */
+  function materializePictureExportRoot(includeMetadata) {
+    const existing = document.getElementById(PICTURE_EXPORT_ROOT_ID);
+    if (existing) existing.remove();
+    const root = extractContent(document, { keepMediaPlaceholders: true });
+    root.id = PICTURE_EXPORT_ROOT_ID;
+    if (includeMetadata) {
+      const meta = extractMetadata();
+      const header = document.createElement('header');
+      const title = document.createElement('h1');
+      title.textContent = meta.title;
+      header.appendChild(title);
+      const detail = normalizeInlineText([meta.account, meta.author, meta.publishDate].filter(Boolean).join(' · '));
+      if (detail) {
+        const paragraph = document.createElement('p');
+        paragraph.textContent = detail;
+        header.appendChild(paragraph);
+      }
+      root.insertBefore(header, root.firstChild);
+    }
+    (document.body || document.documentElement).appendChild(root);
+    return root;
   }
 
   /**
@@ -594,7 +936,8 @@
    * @param {(done:number, total:number)=>void} [onProgress]
    * @returns {Promise<Array<{ok:boolean, base64?:string, mime?:string, ext:string, error?:string}>>}
    */
-  async function downloadImages(items, onProgress) {
+  async function downloadImages(items, onProgress, options) {
+    const opts = options || {};
     let done = 0;
     const total = items.length;
     if (!total) return [];
@@ -626,6 +969,9 @@
         };
       });
       results.push(...batchResults);
+    }
+    if (opts.convertWebp === true) {
+      return Promise.all(results.map((result) => maybeConvertWebp(result, true)));
     }
     return results;
   }
@@ -834,7 +1180,32 @@
       }
     });
 
-    /* --- 规则 4：空链接 / 微信内联样式残留 --- */
+    /* --- 规则 4：删除线与高亮语义（覆盖 GFM 的单波浪号默认输出） --- */
+    service.addRule('wechatStrike', {
+      filter: ['del', 's', 'strike'],
+      replacement: (content) => {
+        const text = String(content || '').trim();
+        return text ? '~~' + text + '~~' : '';
+      }
+    });
+
+    service.addRule('wechatHighlight', {
+      filter: 'mark',
+      replacement: (content) => {
+        const text = String(content || '').trim();
+        return text ? '==' + text + '==' : '';
+      }
+    });
+
+    service.addRule('wechatMediaPlaceholder', {
+      filter: (node) => node.nodeName === 'BLOCKQUOTE' && node.getAttribute('data-wx-placeholder') === '1',
+      replacement: (content) => {
+        const text = String(content || '').trim().replace(/^\\\[([^\]\n]+)\\\]/, '[$1]');
+        return text ? '\n\n> ' + text + '\n\n' : '';
+      }
+    });
+
+    /* --- 规则 5：空链接 / 微信内联样式残留 --- */
     service.addRule('emptyLink', {
       filter: (node) => node.nodeName === 'A' && !(node.getAttribute('href') || '').trim(),
       replacement: (content) => content
@@ -927,6 +1298,9 @@
     lines.push('title: "' + esc(meta.title) + '"');
     lines.push('author: "' + esc(meta.account || meta.author || '') + '"');
     if (meta.publishDate) lines.push('date: "' + esc(meta.publishDate) + '"');
+    if (meta.description) lines.push('description: "' + esc(meta.description) + '"');
+    const cover = meta.coverLocalPath || meta.coverUrl;
+    if (cover) lines.push('cover: "' + esc(cover) + '"');
     lines.push('source: "' + esc(meta.sourceUrl) + '"');
     lines.push('---');
     return lines.join('\n') + '\n\n';
@@ -1046,6 +1420,48 @@
     return bytes;
   }
 
+  /** WebP 浏览器本地转码；任何能力不足都回退原始结果，不阻断导出。 */
+  async function maybeConvertWebp(imageResult, enabled) {
+    if (enabled !== true || !imageResult || !imageResult.ok ||
+        (imageResult.ext !== 'webp' && imageResult.mime !== 'image/webp')) {
+      return imageResult;
+    }
+    let bitmap = null;
+    try {
+      const source = new Blob([base64ToUint8(imageResult.base64)], { type: 'image/webp' });
+      bitmap = await createImageBitmap(source);
+      const canvas = typeof OffscreenCanvas === 'function'
+        ? new OffscreenCanvas(bitmap.width, bitmap.height)
+        : document.createElement('canvas');
+      if (!canvas.width || !canvas.height) {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+      }
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Canvas 2D 上下文不可用');
+      context.drawImage(bitmap, 0, 0);
+
+      let output;
+      if (typeof canvas.convertToBlob === 'function') {
+        output = await canvas.convertToBlob({ type: 'image/png' });
+      } else {
+        output = await new Promise((resolve, reject) => {
+          canvas.toBlob((result) => result ? resolve(result) : reject(new Error('PNG 编码失败')), 'image/png');
+        });
+      }
+      const dataUrl = await blobToDataUrl(output);
+      const base64 = String(dataUrl).split(',')[1];
+      if (!base64) throw new Error('PNG Base64 编码失败');
+      return Object.assign({}, imageResult, { base64, mime: 'image/png', ext: 'png' });
+    } catch (_) {
+      return imageResult;
+    } finally {
+      if (bitmap && typeof bitmap.close === 'function') {
+        try { bitmap.close(); } catch (_) { /* 忽略位图释放异常 */ }
+      }
+    }
+  }
+
   /* ================================================================ */
   /* Markdown 导出主流程                                                */
   /* ================================================================ */
@@ -1056,14 +1472,25 @@
    * @returns {Promise<{ok:boolean, mode:string, filename:string, imageTotal:number, imageFailed:number, markdownLength:number, error?:string}>}
    */
   async function exportMarkdown(settings) {
-    const opts = Object.assign({ bundleImages: true, frontMatter: true, download: true }, settings || {});
+    const opts = Object.assign({
+      bundleImages: true,
+      frontMatter: true,
+      keepMediaPlaceholders: true,
+      includeComments: false,
+      convertWebp: false,
+      download: true
+    }, settings || {});
 
     reportProgress('extracting', { message: '正在提取正文…' });
 
     const meta = extractMetadata();
-    const container = extractContent();
+    const container = extractContent(document, opts);
     const safeTitle = sanitizeFilename(meta.title);
     const { items } = collectImages(container);
+    const bodyImageCount = items.length;
+    if (opts.bundleImages && meta.coverUrl) {
+      items.push({ url: meta.coverUrl, ext: guessExtensionFromUrl(meta.coverUrl), nodes: [], isCover: true });
+    }
 
     // 记录原始地址，供 applyImageSrc 回填
     items.forEach((item) => {
@@ -1087,14 +1514,17 @@
           done,
           total
         });
-      });
+      }, { convertWebp: opts.convertWebp });
 
       imageResults.forEach((result, index) => {
         const item = items[index];
         if (result && result.ok && result.base64) {
           const ext = normalizeExt(result.ext || item.ext || 'png');
-          const localPath = IMAGE_DIR + '/img_' + String(index + 1).padStart(3, '0') + '.' + ext;
+          const localPath = item.isCover
+            ? IMAGE_DIR + '/cover.' + ext
+            : IMAGE_DIR + '/img_' + String(index + 1).padStart(3, '0') + '.' + ext;
           result.localPath = localPath;
+          if (item.isCover) meta.coverLocalPath = './' + localPath;
           urlToSrc.set(item.url, './' + localPath);
         } else {
           failed += 1;
@@ -1113,6 +1543,11 @@
     let markdown = convertHtmlToMarkdown(container, {
       imageResolver: (url) => urlToSrc.get(url) || url
     });
+
+    if (opts.includeComments) {
+      const commentsMarkdown = formatCommentsMarkdown(extractComments(document));
+      if (commentsMarkdown) markdown = markdown.replace(/\n+$/, '') + '\n\n' + commentsMarkdown;
+    }
 
     if (opts.frontMatter) {
       markdown = buildFrontMatter(meta) + markdown;
@@ -1151,10 +1586,11 @@
         ok: true,
         mode: 'zip',
         filename: safeTitle + '.zip',
-        imageTotal: items.length,
+        imageTotal: bodyImageCount,
         imageFailed: failed,
         markdownLength: markdown.length,
-        markdown
+        markdown,
+        zipBlob: opts.download ? undefined : blob
       };
     }
 
@@ -1168,10 +1604,140 @@
       ok: true,
       mode: 'md',
       filename: safeTitle + '.md',
-      imageTotal: items.length,
+      imageTotal: bodyImageCount,
       imageFailed: failed,
       markdownLength: markdown.length,
       markdown
+    };
+  }
+
+  /** Copy MD 与下载 Markdown 共用提取管线，但强制保留原图链接且不写文件。 */
+  async function generateMarkdownText(settings) {
+    const result = await exportMarkdown(Object.assign({}, settings || {}, {
+      bundleImages: false,
+      download: false
+    }));
+    return {
+      ok: true,
+      markdown: result.markdown,
+      charCount: result.markdown.length,
+      title: extractMetadata().title,
+      imageTotal: result.imageTotal,
+      imageFailed: result.imageFailed
+    };
+  }
+
+  /** HTML 与 EPUB 共享的图片下载、WebP 转码和路径回填。 */
+  async function prepareExportAssets(container, meta, settings, srcMode) {
+    const opts = settings || {};
+    const { items } = collectImages(container);
+    const bodyImageCount = items.length;
+    if (meta.coverUrl) items.push({ url: meta.coverUrl, ext: guessExtensionFromUrl(meta.coverUrl), nodes: [], isCover: true });
+    items.forEach((item) => item.nodes.forEach((img) => img.setAttribute('data-wx-original-url', item.url)));
+
+    let imageResults = [];
+    let failed = 0;
+    const urlToSrc = new Map();
+    if (items.length) {
+      reportProgress('downloading', { message: '正在下载图片 (0/' + items.length + ')…', done: 0, total: items.length });
+      imageResults = await downloadImages(items, (done, total) => {
+        reportProgress('downloading', { message: '正在下载图片 (' + done + '/' + total + ')…', done, total });
+      }, { convertWebp: opts.convertWebp });
+    }
+
+    imageResults.forEach((result, index) => {
+      const item = items[index];
+      if (result && result.ok && result.base64) {
+        const ext = normalizeExt(result.ext || item.ext || 'png');
+        const localPath = item.isCover
+          ? IMAGE_DIR + '/cover.' + ext
+          : IMAGE_DIR + '/img_' + String(index + 1).padStart(3, '0') + '.' + ext;
+        result.localPath = localPath;
+        result.isCover = item.isCover === true;
+        if (item.isCover) meta.coverLocalPath = './' + localPath;
+        urlToSrc.set(item.url, srcMode === 'data'
+          ? 'data:' + (result.mime || 'image/png') + ';base64,' + result.base64
+          : './' + localPath);
+      } else {
+        failed += 1;
+        urlToSrc.set(item.url, item.url);
+      }
+    });
+    applyImageSrc(container, urlToSrc);
+    return { items, bodyImageCount, imageResults, imageFailed: failed, urlToSrc };
+  }
+
+  async function exportHtml(settings) {
+    const opts = Object.assign({ keepMediaPlaceholders: true, includeComments: false, convertWebp: false, download: true }, settings || {});
+    reportProgress('extracting', { message: '正在提取正文…' });
+    const meta = extractMetadata();
+    const container = extractContent(document, opts);
+    const assets = await prepareExportAssets(container, meta, opts, 'data');
+    const converter = window.__WX_HTML_CONVERTER__;
+    if (!converter || typeof converter.buildStandaloneHtml !== 'function') throw new Error('HTML 转换器未加载');
+    const commentsHtml = opts.includeComments ? buildCommentsHtml(extractComments(document)) : '';
+    const html = converter.buildStandaloneHtml({
+      meta,
+      contentHtml: container.innerHTML,
+      coverDataUrl: assets.urlToSrc.get(meta.coverUrl) || '',
+      commentsHtml
+    });
+    const filename = sanitizeFilename(meta.title) + '.html';
+    if (opts.download) {
+      reportProgress('saving', { message: '正在保存离线 HTML…' });
+      await triggerDownload(new Blob([html], { type: 'text/html;charset=utf-8' }), filename);
+    }
+    return {
+      ok: true,
+      mode: 'html',
+      filename,
+      imageTotal: assets.bodyImageCount,
+      imageFailed: assets.imageFailed,
+      html
+    };
+  }
+
+  async function exportEpub(settings) {
+    const opts = Object.assign({ keepMediaPlaceholders: true, includeComments: false, convertWebp: false, download: true }, settings || {});
+    reportProgress('extracting', { message: '正在提取正文…' });
+    const meta = extractMetadata();
+    const container = extractContent(document, opts);
+    const assets = await prepareExportAssets(container, meta, opts, 'local');
+    // EPUB 远程图片不会被阅读器作为包内资源登记；失败图改为可读文本占位。
+    Array.from(container.querySelectorAll('img')).forEach((img) => {
+      const src = img.getAttribute('src') || '';
+      if (!/^https?:\/\//i.test(src)) return;
+      const fallback = document.createElement('span');
+      fallback.setAttribute('data-wx-image-fallback', '1');
+      fallback.textContent = '[图片未收录] ' + (normalizeInlineText(img.getAttribute('alt')) || src);
+      const target = img.parentElement && img.parentElement.tagName === 'PICTURE' ? img.parentElement : img;
+      target.parentNode.replaceChild(fallback, target);
+    });
+    if (opts.includeComments) {
+      const commentsHtml = buildCommentsHtml(extractComments(document));
+      if (commentsHtml) container.insertAdjacentHTML('beforeend', commentsHtml);
+    }
+    const converter = window.__WX_EPUB_CONVERTER__;
+    if (!converter || typeof converter.buildEpubZip !== 'function') throw new Error('EPUB 转换器未加载');
+    reportProgress('packing', { message: '正在打包 EPUB…' });
+    const blob = await converter.buildEpubZip({
+      JSZip,
+      meta,
+      contentElement: container,
+      imageResults: assets.imageResults
+    });
+    const filename = sanitizeFilename(meta.title) + '.epub';
+    if (opts.download) {
+      reportProgress('saving', { message: '正在保存 EPUB…' });
+      await triggerDownload(blob, filename);
+    }
+    return {
+      ok: true,
+      mode: 'epub',
+      filename,
+      imageTotal: assets.bodyImageCount,
+      imageFailed: assets.imageFailed,
+      epubBlob: opts.download ? undefined : blob
     };
   }
 
@@ -1191,7 +1757,12 @@
    * @returns {Promise<{restore:()=>void, loaded:number, failed:number}>}
    */
   async function preloadImagesForPrint() {
-    const imgs = Array.from(document.querySelectorAll('#js_content img, .rich_media_content img'));
+    const pictureRoot = document.getElementById(PICTURE_EXPORT_ROOT_ID);
+    const imgs = pictureRoot
+      ? Array.from(pictureRoot.querySelectorAll('img'))
+      : Array.from(document.querySelectorAll(
+        '#js_content img, .rich_media_content img, #js_image_content img, .share_media_swiper img, #img_list img'
+      ));
     const backups = [];
 
     imgs.forEach((img) => {
@@ -1395,7 +1966,7 @@ body > .weui-desktop-mp-mask {
 }
 
 /* 页面里除正文容器外的兄弟节点（侧栏、浮层、骨架屏）一并不打印 */
-body > *:not(#page-content):not(.rich_media_area_primary):not(.rich_media):not(main):not(script):not(style) {
+body > *:not(#page-content):not(.rich_media_area_primary):not(.rich_media):not(main):not(#wx-exporter-picture-root):not(#js_image_content):not(.share_notice):not(.js_share_content):not(#activity-name):not(#js_name):not(script):not(style) {
   display: none !important;
 }
 
@@ -1869,6 +2440,52 @@ a[href]::after { content: "" !important; }
 #js_content * {
   overflow-x: visible !important;
 }
+
+/* 图片消息 / 小绿书：仅打印临时物化的线性正文，不操作原轮播布局 */
+body.wx-exporter-picture-print > *:not(#wx-exporter-picture-root):not(script):not(style) {
+  display: none !important;
+}
+#wx-exporter-picture-root {
+  display: block !important;
+  width: auto !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
+  color: #1a1a1a !important;
+  font-size: 11pt !important;
+  line-height: 1.6 !important;
+}
+#wx-exporter-picture-root header {
+  margin: 0 0 14pt !important;
+  padding: 0 0 8pt !important;
+  border-bottom: 0.5pt solid #e3e6ea !important;
+}
+#wx-exporter-picture-root header h1 {
+  margin: 0 0 6pt !important;
+  font-size: 17pt !important;
+  line-height: 1.35 !important;
+}
+#wx-exporter-picture-root p {
+  margin: 0 0 0.55em !important;
+}
+#wx-exporter-picture-root img {
+  display: block !important;
+  max-width: 100% !important;
+  width: auto !important;
+  height: auto !important;
+  max-height: 165mm !important;
+  margin: 10pt auto !important;
+  object-fit: contain !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+#wx-exporter-picture-root img[data-wx-img-broken] {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
+}
 `;
   }
 
@@ -1895,12 +2512,26 @@ a[href]::after { content: "" !important; }
    * @returns {Promise<{ok:boolean, loaded:number, failed:number}>}
    */
   async function exportPdf() {
-    if (!document.querySelector('#js_content') && !document.querySelector('.rich_media_content')) {
+    if (!document.querySelector('#js_content') && !document.querySelector('.rich_media_content') && !isPictureMessagePage(document)) {
       throw new Error('未找到文章正文容器，请确认当前页面是公众号文章详情页');
     }
 
     reportProgress('preloading', { message: '正在加载全部图片…' });
-    const { restore, loaded, failed } = await preloadImagesForPrint();
+    const picturePage = isPictureMessagePage(document);
+    let pictureRoot = null;
+    if (picturePage) {
+      pictureRoot = materializePictureExportRoot(true);
+      document.body.classList.add('wx-exporter-picture-print');
+    }
+    let preload;
+    try {
+      preload = await preloadImagesForPrint();
+    } catch (error) {
+      if (pictureRoot) pictureRoot.remove();
+      document.body.classList.remove('wx-exporter-picture-print');
+      throw error;
+    }
+    const { restore, loaded, failed } = preload;
 
     reportProgress('printing', { message: '正在准备打印样式…' });
     injectPrintStyle();
@@ -1916,6 +2547,8 @@ a[href]::after { content: "" !important; }
       if (focusHandler) window.removeEventListener('focus', focusHandler);
       removePrintStyle();
       restore();
+      if (pictureRoot) pictureRoot.remove();
+      document.body.classList.remove('wx-exporter-picture-print');
       reportProgress('done', { message: '打印对话框已关闭，页面已恢复' });
     };
 
@@ -1936,6 +2569,103 @@ a[href]::after { content: "" !important; }
     window.print();
 
     return { ok: true, loaded, failed };
+  }
+
+  /* ================================================================ */
+  /* 全页长图页面准备与恢复                                             */
+  /* ================================================================ */
+
+  let longScreenshotState = null;
+
+  async function prepareLongScreenshot(settings) {
+    const opts = settings || {};
+    if (longScreenshotState) cleanupLongScreenshot();
+    const picturePage = isPictureMessagePage(document);
+    const temporaryRoot = picturePage ? materializePictureExportRoot(false) : null;
+    const main = temporaryRoot || document.querySelector('#js_content') || document.querySelector('.rich_media_content');
+    if (!main) throw new Error('未找到可截取的文章正文');
+    const roots = [main];
+    if (!picturePage && opts.includeComments) {
+      const commentsRoot = document.querySelector('#js_cmt_area, .js_cmt_area, .discuss_container, #js_cmt_list, .discuss_list');
+      if (commentsRoot && !main.contains(commentsRoot)) roots.push(commentsRoot);
+    }
+
+    const state = {
+      scrollX: window.scrollX || 0,
+      scrollY: window.scrollY || 0,
+      restoreImages: null,
+      roots,
+      temporaryRoot,
+      markers: roots.map((root) => root.getAttribute('data-wx-screenshot-root')),
+      safetyTimer: null
+    };
+    longScreenshotState = state;
+    state.safetyTimer = setTimeout(() => {
+      if (longScreenshotState === state) cleanupLongScreenshot();
+    }, 300000);
+    const preload = await preloadImagesForPrint();
+    state.restoreImages = preload.restore;
+
+    roots.forEach((root) => root.setAttribute('data-wx-screenshot-root', '1'));
+    const style = document.createElement('style');
+    style.id = SCREENSHOT_STYLE_ID;
+    const commentSelectors = opts.includeComments ? '' : `
+#js_cmt_area, .js_cmt_area, .discuss_container, #js_article_comment, .comment_area { display: none !important; }`;
+    style.textContent = `
+html, body { margin: 0 !important; background: #fff !important; }
+#js_pc_qr_code, .qr_code_pc, .qr_code_pc_outer, #js_article_bottom_bar,
+.rich_media_tool, .rich_media_tool_full, .rich_media_area_extra,
+.related_read_wrp, .recommend_list, .wx_ad_btn, .js_ad_link, #js_sg_bar,
+#js_tags, .reward_area, .reward_qrcode_area { display: none !important; }
+${commentSelectors}
+[data-wx-screenshot-root="1"] {
+  display: block !important; box-sizing: border-box !important;
+  width: 750px !important; max-width: 750px !important; min-width: 0 !important;
+  margin: 0 auto !important; padding: 32px 28px !important;
+  overflow: visible !important; background: #fff !important;
+}
+[data-wx-screenshot-root="1"] img { max-width: 100% !important; height: auto !important; }
+`;
+    (document.head || document.documentElement).appendChild(style);
+    window.scrollTo(0, 0);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const rects = roots.map((root) => root.getBoundingClientRect());
+    const left = Math.min(...rects.map((rect) => rect.left));
+    const top = Math.min(...rects.map((rect) => rect.top));
+    const right = Math.max(...rects.map((rect) => rect.right));
+    const bottom = Math.max(...rects.map((rect) => rect.bottom));
+    if (!(right > left) || !(bottom > top)) throw new Error('正文尺寸无效，无法生成长图');
+    return {
+      ok: true,
+      clip: {
+        x: Math.max(0, left + (window.scrollX || 0)),
+        y: Math.max(0, top + (window.scrollY || 0)),
+        width: right - left,
+        height: bottom - top
+      },
+      loaded: preload.loaded,
+      failed: preload.failed,
+      title: extractMetadata().title
+    };
+  }
+
+  function cleanupLongScreenshot() {
+    const state = longScreenshotState;
+    longScreenshotState = null;
+    const style = document.getElementById(SCREENSHOT_STYLE_ID);
+    if (style) style.remove();
+    if (state) {
+      if (state.safetyTimer) clearTimeout(state.safetyTimer);
+      state.roots.forEach((root, index) => {
+        const marker = state.markers[index];
+        if (marker === null) root.removeAttribute('data-wx-screenshot-root');
+        else root.setAttribute('data-wx-screenshot-root', marker);
+      });
+      if (state.restoreImages) state.restoreImages();
+      if (state.temporaryRoot) state.temporaryRoot.remove();
+      try { window.scrollTo(state.scrollX, state.scrollY); } catch (_) { /* 页面已跳转 */ }
+    }
+    return { ok: true };
   }
 
   /* ================================================================ */
@@ -1971,18 +2701,55 @@ a[href]::after { content: "" !important; }
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const action = message && message.action;
-      if (action !== 'EXPORT_MARKDOWN' && action !== 'EXPORT_PDF' && action !== 'PING_PAGE') {
-        return false;
-      }
+      const supportedActions = [
+        'EXPORT_MARKDOWN', 'EXPORT_PDF', 'COPY_MARKDOWN', 'EXPORT_HTML', 'EXPORT_EPUB',
+        'PREPARE_LONG_PNG', 'CLEANUP_LONG_PNG', 'PING_PAGE'
+      ];
+      if (!supportedActions.includes(action)) return false;
 
       if (action === 'PING_PAGE') {
-        sendResponse({ ok: true, supported: !!(document.querySelector('#js_content') || document.querySelector('.rich_media_content')) });
+        sendResponse({
+          ok: true,
+          supported: !!(document.querySelector('#js_content') || document.querySelector('.rich_media_content') || isPictureMessagePage(document))
+        });
         return false;
       }
 
       if (action === 'EXPORT_PDF') {
         withExportLock(() => exportPdf())
           .then((result) => sendAsyncResponse(sendResponse, result))
+          .catch((error) => sendAsyncResponse(sendResponse, { ok: false, error: errorMessage(error) }));
+        return true;
+      }
+
+      if (action === 'CLEANUP_LONG_PNG') {
+        sendAsyncResponse(sendResponse, cleanupLongScreenshot());
+        return false;
+      }
+
+      if (action === 'PREPARE_LONG_PNG') {
+        withExportLock(() => prepareLongScreenshot(message.settings || {}))
+          .then((result) => sendAsyncResponse(sendResponse, result))
+          .catch((error) => sendAsyncResponse(sendResponse, { ok: false, error: errorMessage(error) }));
+        return true;
+      }
+
+      if (action === 'COPY_MARKDOWN') {
+        withExportLock(() => generateMarkdownText(message.settings || {}))
+          .then((result) => sendAsyncResponse(sendResponse, result))
+          .catch((error) => sendAsyncResponse(sendResponse, { ok: false, error: errorMessage(error) }));
+        return true;
+      }
+
+      if (action === 'EXPORT_HTML' || action === 'EXPORT_EPUB') {
+        const task = action === 'EXPORT_HTML' ? exportHtml : exportEpub;
+        withExportLock(() => task(message.settings || {}))
+          .then((result) => {
+            const summary = Object.assign({}, result);
+            delete summary.html;
+            delete summary.epubBlob;
+            sendAsyncResponse(sendResponse, summary);
+          })
           .catch((error) => sendAsyncResponse(sendResponse, { ok: false, error: errorMessage(error) }));
         return true;
       }
@@ -2011,6 +2778,14 @@ a[href]::after { content: "" !important; }
     sanitizeFilename,
     extractMetadata,
     extractContent,
+    preserveInlineSemanticStyles,
+    convertMediaCardsToPlaceholders,
+    isPictureMessagePage,
+    extractPictureMessageContent,
+    materializePictureExportRoot,
+    extractComments,
+    formatCommentsMarkdown,
+    buildCommentsHtml,
     markStructuralHints,
     collectImages,
     applyImageSrc,
@@ -2032,11 +2807,20 @@ a[href]::after { content: "" !important; }
     removePrintStyle,
     preloadImagesForPrint,
     exportMarkdown,
+    generateMarkdownText,
+    exportHtml,
+    exportEpub,
+    prepareExportAssets,
+    downloadImages,
+    maybeConvertWebp,
     exportPdf,
+    prepareLongScreenshot,
+    cleanupLongScreenshot,
     runPool,
     base64ToUint8,
     IMAGE_DIR,
     PRINT_STYLE_ID,
+    SCREENSHOT_STYLE_ID,
     NOISE_SELECTORS
   };
 

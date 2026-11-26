@@ -46,6 +46,8 @@ function loadBackground(config) {
   const storage = cfg.storage || {};
   const listeners = { message: [], installed: [] };
   const downloads = [];
+  const debuggerCalls = [];
+  const tabMessages = [];
 
   const chromeStub = {
     runtime: {
@@ -70,7 +72,31 @@ function loadBackground(config) {
     downloads: {
       async download(options) {
         downloads.push(options);
+        debuggerCalls.push('download');
+        if (cfg.downloadError) throw new Error(cfg.downloadError);
         return downloads.length;
+      }
+    },
+    tabs: {
+      async sendMessage(tabId, message) {
+        tabMessages.push({ tabId, message });
+        return { ok: true };
+      }
+    },
+    debugger: {
+      async attach(debuggee, version) {
+        debuggerCalls.push('attach');
+        if (cfg.onAttach) cfg.onAttach(debuggee, version);
+      },
+      async sendCommand(debuggee, method, options) {
+        debuggerCalls.push('capture');
+        if (cfg.onCapture) cfg.onCapture(debuggee, method, options);
+        if (cfg.captureError) throw new Error(cfg.captureError);
+        return { data: cfg.captureData || 'UE5HX0RBVEE=' };
+      },
+      async detach() {
+        debuggerCalls.push('detach');
+        if (cfg.detachError) throw new Error(cfg.detachError);
       }
     }
   };
@@ -112,7 +138,7 @@ function loadBackground(config) {
     });
   }
 
-  return { sandbox, storage, downloads, listeners, dispatch };
+  return { sandbox, storage, downloads, debuggerCalls, tabMessages, listeners, dispatch };
 }
 
 /* ------------------------------------------------------------------ */
@@ -296,13 +322,16 @@ function errorResponse(status) {
     assert.strictEqual(bg.downloads.length, 0);
   });
 
-  await test('GET_SETTINGS 返回默认值（两项均为 true）', async () => {
+  await test('GET_SETTINGS 返回五项规范化默认值', async () => {
     const bg = loadBackground();
     const resp = await bg.dispatch({ action: 'GET_SETTINGS' });
     assert.strictEqual(resp.ok, true);
     // 对象由 vm realm 创建，逐字段比对而非 deepStrictEqual
     assert.strictEqual(resp.settings.bundleImages, true);
     assert.strictEqual(resp.settings.frontMatter, true);
+    assert.strictEqual(resp.settings.convertWebp, false);
+    assert.strictEqual(resp.settings.keepMediaPlaceholders, true);
+    assert.strictEqual(resp.settings.includeComments, false);
   });
 
   await test('SET_SETTINGS 合并写入并可被 GET_SETTINGS 读回', async () => {
@@ -312,6 +341,66 @@ function errorResponse(status) {
     assert.strictEqual(resp.settings.frontMatter, false);
     assert.strictEqual(resp.settings.bundleImages, true);
     assert.ok(bg.storage.wxExporterSettings, '未写入 storage');
+  });
+
+  await test('TC-21：长图 CDP 按 attach → capture → download → detach 执行', async () => {
+    let capture = null;
+    const bg = loadBackground({
+      onCapture: (_debuggee, method, options) => { capture = { method, options }; }
+    });
+    const resp = await bg.dispatch({
+      action: 'CAPTURE_LONG_PNG',
+      tabId: 7,
+      clip: { x: -4, y: 10.2, width: 750.2, height: 5000.1 },
+      filename: '文章.png'
+    });
+    assert.strictEqual(resp.ok, true, JSON.stringify(resp));
+    assert.deepStrictEqual(bg.debuggerCalls, ['attach', 'capture', 'download', 'detach']);
+    assert.strictEqual(capture.method, 'Page.captureScreenshot');
+    assert.strictEqual(capture.options.captureBeyondViewport, true);
+    assert.strictEqual(capture.options.fromSurface, true);
+    assert.strictEqual(capture.options.clip.scale, 2);
+    assert.strictEqual(capture.options.clip.width, 751);
+    assert.strictEqual(capture.options.clip.height, 5001);
+    assert.ok(bg.downloads[0].url.startsWith('data:image/png;base64,'));
+  });
+
+  await test('TC-21：高度超过 12000 时自动降 scale=1', async () => {
+    let options = null;
+    const bg = loadBackground({ onCapture: (_d, _m, value) => { options = value; } });
+    const resp = await bg.dispatch({
+      action: 'CAPTURE_LONG_PNG', tabId: 8,
+      clip: { x: 0, y: 0, width: 750, height: 12001 }, filename: '长文.png'
+    });
+    assert.strictEqual(resp.ok, true);
+    assert.strictEqual(resp.scale, 1);
+    assert.strictEqual(options.clip.scale, 1);
+    assert.deepStrictEqual(bg.debuggerCalls, ['attach', 'capture', 'download', 'detach']);
+  });
+
+  await test('TC-21：sendCommand 抛错仍 detach 且不触发下载', async () => {
+    const bg = loadBackground({ captureError: '模拟 CDP 崩溃' });
+    const resp = await bg.dispatch({
+      action: 'CAPTURE_LONG_PNG', tabId: 9,
+      clip: { x: 0, y: 0, width: 750, height: 3000 }, filename: '异常.png'
+    });
+    assert.strictEqual(resp.ok, false);
+    assert.ok(/模拟 CDP 崩溃/.test(resp.error));
+    assert.deepStrictEqual(bg.debuggerCalls, ['attach', 'capture', 'detach']);
+    assert.strictEqual(bg.downloads.length, 0);
+    assert.strictEqual(bg.tabMessages.length, 1);
+    assert.strictEqual(bg.tabMessages[0].message.action, 'CLEANUP_LONG_PNG');
+  });
+
+  await test('TC-21：下载失败仍 detach 并由后台恢复页面', async () => {
+    const bg = loadBackground({ downloadError: '模拟下载失败' });
+    const resp = await bg.dispatch({
+      action: 'CAPTURE_LONG_PNG', tabId: 10,
+      clip: { x: 0, y: 0, width: 750, height: 3000 }, filename: '异常.png'
+    });
+    assert.strictEqual(resp.ok, false);
+    assert.deepStrictEqual(bg.debuggerCalls, ['attach', 'capture', 'download', 'detach']);
+    assert.strictEqual(bg.tabMessages[0].message.action, 'CLEANUP_LONG_PNG');
   });
 
   await test('未知 action 返回 false（不占用异步通道）', async () => {

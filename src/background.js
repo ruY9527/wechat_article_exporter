@@ -15,8 +15,11 @@
  */
 
 const DEFAULT_SETTINGS = Object.freeze({
-  bundleImages: true, // 导出 Markdown 时打包本地图片（ZIP）
-  frontMatter: true   // 生成 YAML Front Matter
+  bundleImages: true,          // 导出 Markdown 时打包本地图片（ZIP）
+  frontMatter: true,           // 生成 YAML Front Matter
+  convertWebp: false,          // WebP 图片自动转为 PNG
+  keepMediaPlaceholders: true, // 保留音视频/名片/引用卡片占位提示
+  includeComments: false       // 附带导出精选评论
 });
 
 const IMAGE_TIMEOUT_MS = 10000; // 单图 10s 超时（设计文档 4.2）
@@ -146,7 +149,10 @@ async function getSettings() {
   const merged = Object.assign({}, DEFAULT_SETTINGS, stored?.wxExporterSettings || {});
   return {
     bundleImages: merged.bundleImages !== false,
-    frontMatter: merged.frontMatter !== false
+    frontMatter: merged.frontMatter !== false,
+    convertWebp: merged.convertWebp === true,
+    keepMediaPlaceholders: merged.keepMediaPlaceholders !== false,
+    includeComments: merged.includeComments === true
   };
 }
 
@@ -155,6 +161,75 @@ async function setSettings(patch) {
   const next = Object.assign({}, current, patch || {});
   await chrome.storage.local.set({ wxExporterSettings: next });
   return next;
+}
+
+/* ------------------------------------------------------------------ */
+/* CDP 全页长图                                                        */
+/* ------------------------------------------------------------------ */
+
+async function withTimeout(promise, timeoutMs, label) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label + '超时')), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function captureLongPng(message) {
+  const tabId = Number(message && message.tabId);
+  const clip = message && message.clip;
+  const filename = String((message && message.filename) || 'wechat-article.png');
+  if (!Number.isInteger(tabId) || tabId < 0 || !clip ||
+      !(Number(clip.width) > 0) || !(Number(clip.height) > 0)) {
+    return { ok: false, error: '长图截图参数无效' };
+  }
+  if (!chrome.debugger || typeof chrome.debugger.attach !== 'function' ||
+      typeof chrome.debugger.sendCommand !== 'function') {
+    return { ok: false, error: '调试权限未授权或当前 Chrome 不支持 CDP 截图' };
+  }
+
+  const debuggee = { tabId };
+  try {
+    await withTimeout(chrome.debugger.attach(debuggee, '1.3'), 30000, '连接调试会话');
+    const scale = Number(clip.height) > 12000 ? 1 : 2;
+    const response = await withTimeout(chrome.debugger.sendCommand(debuggee, 'Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: true,
+      fromSurface: true,
+      clip: {
+        x: Math.max(0, Math.floor(Number(clip.x) || 0)),
+        y: Math.max(0, Math.floor(Number(clip.y) || 0)),
+        width: Math.ceil(Number(clip.width)),
+        height: Math.ceil(Number(clip.height)),
+        scale
+      }
+    }), 120000, 'CDP 截图');
+    if (!response || !response.data) throw new Error('CDP 未返回截图数据');
+    const downloadId = await withTimeout(chrome.downloads.download({
+      url: 'data:image/png;base64,' + response.data,
+      filename,
+      saveAs: false,
+      conflictAction: 'uniquify'
+    }), 60000, '保存长图');
+    return { ok: true, downloadId, scale };
+  } catch (error) {
+    return { ok: false, error: String(error && error.message ? error.message : error) };
+  } finally {
+    // 无论 attach 后的哪一步失败，都清除调试会话与浏览器提示横幅。
+    try { await withTimeout(chrome.debugger.detach(debuggee), 10000, '分离调试会话'); } catch (_) { /* 已分离或页面已关闭 */ }
+    // Popup 可能已被用户关闭，后台仍负责恢复内容脚本注入的页面状态。
+    try {
+      if (chrome.tabs && typeof chrome.tabs.sendMessage === 'function') {
+        await withTimeout(chrome.tabs.sendMessage(tabId, { action: 'CLEANUP_LONG_PNG' }), 5000, '恢复页面');
+      }
+    } catch (_) { /* 页面导航或关闭时无需再恢复 */ }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -198,6 +273,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     chrome.downloads.download({ url, filename, saveAs: false, conflictAction: 'uniquify' })
       .then((downloadId) => sendResponse({ ok: true, downloadId }))
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+    return true;
+  }
+
+  if (action === 'CAPTURE_LONG_PNG') {
+    captureLongPng(message)
+      .then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;
   }

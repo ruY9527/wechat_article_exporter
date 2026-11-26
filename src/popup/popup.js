@@ -11,7 +11,13 @@
  *   · 消息协议：EXPORT_MARKDOWN / EXPORT_PDF / EXPORT_PROGRESS
  */
 
-const DEFAULT_SETTINGS = { bundleImages: true, frontMatter: true };
+const DEFAULT_SETTINGS = Object.freeze({
+  bundleImages: true,
+  frontMatter: true,
+  convertWebp: false,
+  keepMediaPlaceholders: true,
+  includeComments: false
+});
 
 /** 文章页 URL 判定：https://mp.weixin.qq.com/s... */
 const ARTICLE_URL_PATTERN = /^https:\/\/mp\.weixin\.qq\.com\/s(?:[/?#]|$)/i;
@@ -49,8 +55,15 @@ function cacheDom() {
   ui.statusText = document.getElementById('page-status-text');
   ui.optBundle = document.getElementById('opt-bundle');
   ui.optFrontMatter = document.getElementById('opt-frontmatter');
+  ui.optWebp = document.getElementById('opt-webp');
+  ui.optMedia = document.getElementById('opt-media');
+  ui.optComments = document.getElementById('opt-comments');
   ui.btnMarkdown = document.getElementById('btn-markdown');
+  ui.btnCopy = document.getElementById('btn-copy');
   ui.btnPdf = document.getElementById('btn-pdf');
+  ui.btnHtml = document.getElementById('btn-html');
+  ui.btnEpub = document.getElementById('btn-epub');
+  ui.btnLongPng = document.getElementById('btn-long-png');
   ui.progress = document.getElementById('progress');
   ui.progressFill = document.getElementById('progress-fill');
   ui.progressText = document.getElementById('progress-text');
@@ -60,8 +73,15 @@ function cacheDom() {
 function bindEvents() {
   ui.optBundle.addEventListener('change', persistSettings);
   ui.optFrontMatter.addEventListener('change', persistSettings);
+  ui.optWebp.addEventListener('change', persistSettings);
+  ui.optMedia.addEventListener('change', persistSettings);
+  ui.optComments.addEventListener('change', persistSettings);
   ui.btnMarkdown.addEventListener('click', onExportMarkdown);
+  ui.btnCopy.addEventListener('click', onCopyMarkdown);
   ui.btnPdf.addEventListener('click', onExportPdf);
+  ui.btnHtml.addEventListener('click', onExportHtml);
+  ui.btnEpub.addEventListener('click', onExportEpub);
+  ui.btnLongPng.addEventListener('click', onExportLongPng);
 }
 
 async function initialize() {
@@ -124,12 +144,18 @@ async function loadSettings() {
   }
   ui.optBundle.checked = settings.bundleImages !== false;
   ui.optFrontMatter.checked = settings.frontMatter !== false;
+  ui.optWebp.checked = settings.convertWebp === true;
+  ui.optMedia.checked = settings.keepMediaPlaceholders !== false;
+  ui.optComments.checked = settings.includeComments === true;
 }
 
 async function persistSettings() {
   const settings = {
     bundleImages: ui.optBundle.checked,
-    frontMatter: ui.optFrontMatter.checked
+    frontMatter: ui.optFrontMatter.checked,
+    convertWebp: ui.optWebp.checked,
+    keepMediaPlaceholders: ui.optMedia.checked,
+    includeComments: ui.optComments.checked
   };
   try {
     await chrome.storage.local.set({ wxExporterSettings: settings });
@@ -141,7 +167,10 @@ async function persistSettings() {
 function readSettings() {
   return {
     bundleImages: ui.optBundle.checked,
-    frontMatter: ui.optFrontMatter.checked
+    frontMatter: ui.optFrontMatter.checked,
+    convertWebp: ui.optWebp.checked,
+    keepMediaPlaceholders: ui.optMedia.checked,
+    includeComments: ui.optComments.checked
   };
 }
 
@@ -226,6 +255,171 @@ async function onExportPdf() {
   } else {
     showHint('info', tip);
   }
+}
+
+async function onCopyMarkdown() {
+  if (busy) return;
+  setBusy(true);
+  clearHint();
+  showProgress(null, '正在生成 Markdown…');
+  try {
+    const result = await sendToTab({ action: 'COPY_MARKDOWN', settings: readSettings() }, 60000);
+    if (!result.ok) throw new Error(result.error);
+    const data = result.data || {};
+    if (data.ok === false) throw new Error(data.error);
+    await writeClipboard(String(data.markdown || ''));
+    showProgress(100, '复制完成');
+    showHint('success', '已复制 Markdown 到剪贴板（共 ' + Number(data.charCount || 0).toLocaleString('zh-CN') + ' 字）');
+  } catch (error) {
+    showProgress(0, '复制失败');
+    showHint('error', friendlyError(errorText(error)));
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_) { /* 继续尝试隐藏 textarea 兜底 */ }
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  let copied = false;
+  try { copied = document.execCommand('copy'); } catch (_) { copied = false; }
+  textarea.remove();
+  if (!copied) throw new Error('剪贴板写入失败，请允许扩展访问剪贴板后重试');
+}
+
+async function onExportHtml() {
+  await exportAdditionalFile('EXPORT_HTML', '离线 HTML');
+}
+
+async function onExportEpub() {
+  await exportAdditionalFile('EXPORT_EPUB', 'EPUB 电子书');
+}
+
+async function exportAdditionalFile(action, label) {
+  if (busy) return;
+  setBusy(true);
+  clearHint();
+  showProgress(0, '正在准备' + label + '…');
+  try {
+    const result = await sendToTab({ action, settings: readSettings() }, 180000);
+    if (!result.ok) throw new Error(result.error);
+    const data = result.data || {};
+    if (data.ok === false) throw new Error(data.error);
+    showProgress(100, '导出完成');
+    const failed = Number(data.imageFailed || 0);
+    const failureNote = action === 'EXPORT_EPUB'
+      ? failed + ' 张图片下载失败，EPUB 中已改为文本占位。'
+      : failed + ' 张图片下载失败，已保留原链接。';
+    showHint(failed ? 'warn' : 'success',
+      (failed ? failureNote : '已保存 ' + label + '：') + (data.filename || ''));
+  } catch (error) {
+    showProgress(0, '导出失败');
+    showHint('error', friendlyError(errorText(error)));
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function ensureDebuggerPermission() {
+  if (!chrome.permissions) return false;
+  const granted = await chrome.permissions.contains({ permissions: ['debugger'] });
+  if (granted) return true;
+  return chrome.permissions.request({ permissions: ['debugger'] });
+}
+
+async function onExportLongPng() {
+  if (busy) return;
+  setBusy(true);
+  clearHint();
+  showProgress(0, '正在申请长图截图权限…');
+  let attempted = false;
+  try {
+    const granted = await ensureDebuggerPermission();
+    if (!granted) {
+      showProgress(0, '已取消');
+      showHint('info', '需要临时调试权限以截取完整长图，已取消');
+      return;
+    }
+    attempted = true;
+    showProgress(null, '正在加载图片并计算完整页面…');
+    const prepared = await sendToTab({ action: 'PREPARE_LONG_PNG', settings: readSettings() }, 180000);
+    if (!prepared.ok) throw new Error(prepared.error);
+    const prepData = prepared.data || {};
+    if (prepData.ok === false) throw new Error(prepData.error);
+
+    showProgress(80, '正在截取完整长图…');
+    const capture = await sendToBackground({
+      action: 'CAPTURE_LONG_PNG',
+      tabId: activeTabId,
+      clip: prepData.clip,
+      filename: sanitizePngFilename(prepData.title) + '.png'
+    }, 180000);
+    if (!capture.ok) throw new Error(capture.error);
+    const captureData = capture.data || {};
+    if (captureData.ok === false) throw new Error(captureData.error);
+    showProgress(100, '长图已保存');
+    const failed = Number(prepData.failed || 0);
+    showHint(failed ? 'warn' : 'success', failed ? failed + ' 张图片未加载成功，请检查长图。' : '全页长图 PNG 已保存。');
+  } catch (error) {
+    showProgress(0, '长图导出失败');
+    showHint('error', friendlyError(errorText(error)));
+  } finally {
+    if (attempted) {
+      const cleaned = await sendToTab({ action: 'CLEANUP_LONG_PNG' }, 5000);
+      if (!cleaned.ok || !cleaned.data || cleaned.data.ok === false) {
+        showHint('warn', '长图流程已结束，但页面自动恢复未确认；请刷新文章页以清理临时状态。');
+      }
+    }
+    setBusy(false);
+  }
+}
+
+function sendToBackground(message, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok: false, error: '后台截图超时，请重试' });
+    }, timeoutMs || 180000);
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const lastError = chrome.runtime.lastError;
+        if (lastError) resolve({ ok: false, error: lastError.message || '后台消息异常' });
+        else if (!response) resolve({ ok: false, error: '后台截图无响应' });
+        else resolve({ ok: true, data: response });
+      });
+    } catch (error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: errorText(error) });
+    }
+  });
+}
+
+function sanitizePngFilename(title) {
+  const value = String(title || 'wechat-article')
+    .replace(/[\\/:*?"<>|\r\n]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80)
+    .replace(/[. ]+$/g, '');
+  return value || 'wechat-article';
 }
 
 /* ------------------------------------------------------------------ */
@@ -318,22 +512,25 @@ function setStatus(kind, text) {
 }
 
 function disableActions(disabled) {
-  ui.btnMarkdown.disabled = disabled;
-  ui.btnPdf.disabled = disabled;
+  [ui.btnMarkdown, ui.btnCopy, ui.btnPdf, ui.btnHtml, ui.btnEpub, ui.btnLongPng]
+    .forEach((button) => { button.disabled = disabled; });
 }
 
 function setBusy(value) {
   busy = value;
   disableActions(value);
-  ui.btnMarkdown.classList.toggle('btn--busy', value);
-  ui.btnPdf.classList.toggle('btn--busy', value);
-  if (value) {
-    ui.btnMarkdown.querySelector('.btn__label').textContent = '导出中…';
-    ui.btnPdf.querySelector('.btn__label').textContent = '处理中…';
-  } else {
-    ui.btnMarkdown.querySelector('.btn__label').textContent = '导出 Markdown';
-    ui.btnPdf.querySelector('.btn__label').textContent = '导出 PDF';
-  }
+  const labels = [
+    [ui.btnMarkdown, '导出 Markdown'],
+    [ui.btnCopy, '复制 Markdown'],
+    [ui.btnPdf, '导出 PDF'],
+    [ui.btnHtml, '离线 HTML'],
+    [ui.btnEpub, 'EPUB 电子书'],
+    [ui.btnLongPng, '导出长图 PNG']
+  ];
+  labels.forEach(([button, label]) => {
+    button.classList.toggle('btn--busy', value);
+    button.querySelector('.btn__label').textContent = value ? '处理中…' : label;
+  });
 }
 
 /**
